@@ -1,0 +1,11 @@
+package-as: ActionSlotPicker
+
+manual-changelog:
+  filename: CHANGELOG.md
+  markup-type: markdown
+
+ignore:
+  - README.md
+  - .gitignore
+  - .github
+  - media
