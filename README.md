@@ -14,14 +14,21 @@ WoW: Forever addon for filling action bars without dragging things out of the sp
 overwrite, rename, delete. Loadouts are stored per class for the whole account; spells and macros are matched by name.
 Drag the button to move it around the minimap.
 
+Spells of a loadout that your character does not know right now (other talents, runes) leave their slot empty and are
+placed automatically as soon as you learn them, for example after switching talents. The minimap menu lists them
+while they wait.
+
 Slots can only be changed out of combat.
 
 ## Commands
 
-- `/asp`: help
+- `/asp`: open the loadout menu
+- `/asp help`: list the commands
 - `/asp minimap`: show or hide the minimap button
 - `/asp rank`: list the slots that follow the latest spell rank
 - `/asp save <name>`, `/asp load <name>`, `/asp list`: action bar loadouts
+- `/asp probe on|off|bars|check <name>|clear`: diagnostics for loadouts; records every step per slot into the saved
+  variables (written at `/reload`), useful for bug reports
 
 ## Install
 

@@ -60,6 +60,111 @@ local function CombatBlocked()
 end
 
 ------------------------------------------------------------------------
+-- Probe (/asp probe on): records every loadout step per slot into ActionSlotPickerDB.probe.runs,
+-- written to disk at /reload or logout. Off by default; costs nothing while off.
+------------------------------------------------------------------------
+
+local PROBE_MAX_RUNS = 15
+local PROBE_WATCH_SECONDS = 4
+local probeRun -- run that receives lines right now
+local probeWatch -- run that receives events (slot changes, UI errors) for a few seconds
+
+local function ProbeOn()
+    return DB and DB.probe and DB.probe.enabled
+end
+
+local function ActionText(slot)
+    local t, id, sub = GetActionInfo(slot)
+    t, id, sub = Safe(t), Safe(id), Safe(sub)
+    if not t then return "empty" end
+    local text = t .. ":" .. tostring(id)
+    if sub ~= nil and sub ~= "" then text = text .. "/" .. tostring(sub) end
+    return text
+end
+
+local function CursorText()
+    local a, b, c, d = GetCursorInfo()
+    a, b, c, d = Safe(a), Safe(b), Safe(c), Safe(d)
+    if not a then return "none" end
+    return ("%s,%s,%s,%s"):format(tostring(a), tostring(b), tostring(c), tostring(d))
+end
+
+local function ProbeLine(fmt, ...)
+    if probeRun then probeRun.lines[#probeRun.lines + 1] = fmt:format(...) end
+end
+
+local function ProbeBegin(kind, detail)
+    if not ProbeOn() then return nil end
+    local name, realm = UnitFullName("player")
+    local version, build = GetBuildInfo()
+    local run = {
+        kind = kind, detail = detail, at = date("%Y-%m-%d %H:%M:%S"), t0 = GetTime(),
+        char = (name or "?") .. "-" .. (realm or ""), class = ClassKey(), build = tostring(version) .. "." .. tostring(build),
+        page = GetActionBarPage and Safe(GetActionBarPage()), bonus = GetBonusBarOffset and Safe(GetBonusBarOffset()),
+        combat = InCombatLockdown() and true or nil, lines = {}, events = {},
+    }
+    local runs = DB.probe.runs
+    runs[#runs + 1] = run
+    while #runs > PROBE_MAX_RUNS do table.remove(runs, 1) end
+    probeRun = run
+    return run
+end
+
+local function ProbeEnd()
+    probeRun = nil
+end
+
+-- Events for a few seconds after a run: did the server keep the slots, did the client complain?
+local function ProbeWatch(run)
+    if not run then return end
+    probeWatch = run
+    C_Timer.After(PROBE_WATCH_SECONDS, function()
+        if probeWatch == run then probeWatch = nil end
+    end)
+end
+
+-- expected = { [slot] = ActionText right after placing }; compared again after 1 s and 3 s.
+local function ProbeVerify(run, expected)
+    if not run then return end
+    for _, delay in ipairs({ 1, 3 }) do
+        C_Timer.After(delay, function()
+            local diffs = 0
+            for slot, want in pairs(expected) do
+                local now = ActionText(slot)
+                if now ~= want then
+                    diffs = diffs + 1
+                    run.lines[#run.lines + 1] = ("verify+%ds slot %d: expected %s, now %s"):format(delay, slot, want, now)
+                end
+            end
+            run.lines[#run.lines + 1] = ("verify+%ds: %d of %d slots differ"):format(delay, diffs, (function()
+                local n = 0
+                for _ in pairs(expected) do n = n + 1 end
+                return n
+            end)())
+        end)
+    end
+end
+
+local probeEvents = CreateFrame("Frame")
+probeEvents:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+probeEvents:RegisterEvent("UI_ERROR_MESSAGE")
+probeEvents:RegisterEvent("ACTIONBAR_PAGE_CHANGED")
+probeEvents:RegisterEvent("UPDATE_BONUS_ACTIONBAR")
+probeEvents:SetScript("OnEvent", function(_, event, a, b)
+    local run = probeWatch
+    if not run then return end
+    local dt = GetTime() - run.t0
+    if event == "ACTIONBAR_SLOT_CHANGED" then
+        run.slotEvents = run.slotEvents or {}
+        local slot = Safe(a)
+        if slot then run.slotEvents[slot] = (run.slotEvents[slot] or 0) + 1 end
+        return
+    end
+    local text = Safe(b) or Safe(a)
+    run.events[#run.events + 1] = ("%.2fs %s %s"):format(dt, event, tostring(text))
+end)
+
+------------------------------------------------------------------------
 -- Data: spellbook
 ------------------------------------------------------------------------
 
@@ -178,13 +283,16 @@ end
 ------------------------------------------------------------------------
 
 -- pickup() puts something on the cursor; it goes into the slot and whatever was there is dropped.
+-- Returns ok, plus (only while a probe run is open) the cursor after pickup and after PlaceAction.
 local function PlaceInto(slot, pickup)
     ClearCursor()
     pickup()
-    if not GetCursorInfo() then return false end
+    local cursor = probeRun and CursorText() or nil
+    if not GetCursorInfo() then return false, cursor end
     PlaceAction(slot)
+    local swapped = probeRun and CursorText() or nil
     ClearCursor()
-    return true
+    return true, cursor, swapped
 end
 
 local function ClearSlot(slot)
@@ -223,19 +331,31 @@ local function UpgradeSlot(slot, best, byID)
     local current = actionType == "spell" and id and byID[id]
     local top = current and best[current.name]
     if top and top.spellID ~= current.spellID and top.rank > current.rank then
-        if PlaceInto(slot, PickupRank(top)) then return top end
+        local before = probeRun and ActionText(slot)
+        local ok, cursor, swapped = PlaceInto(slot, PickupRank(top))
+        ProbeLine("upgrade slot %d: %s %s(r%s) -> %s(r%s) book#%s cursor=%s placed=%s swapped=%s ok=%s", slot,
+            tostring(before), current.name, tostring(current.rank), tostring(top.spellID), tostring(top.rank),
+            tostring(top.index), tostring(cursor), probeRun and ActionText(slot) or "", tostring(swapped), tostring(ok))
+        if ok then return top end
     end
 end
 
 -- onlySlot: upgrade just that slot (checkbox switched on); otherwise every slot switched on.
-local function UpgradeRanks(onlySlot)
+local function UpgradeRanks(onlySlot, reason)
     if not next(CharDB.latest) then return end
     if InCombatLockdown() then
         pendingUpgrade = true
         return
     end
     pendingUpgrade = false
+    local ownRun = not probeRun and ProbeBegin("upgrade", reason or (onlySlot and ("checkbox slot " .. onlySlot)) or "?")
     local _, best, byID = ReadSpellbook()
+    if probeRun then
+        local flagged = {}
+        for slot in pairs(CharDB.latest) do flagged[#flagged + 1] = slot end
+        table.sort(flagged)
+        ProbeLine("latest-rank slots: %s", table.concat(flagged, ","))
+    end
     for slot in pairs(CharDB.latest) do
         if not onlySlot or slot == onlySlot then
             local top = UpgradeSlot(slot, best, byID)
@@ -243,6 +363,10 @@ local function UpgradeRanks(onlySlot)
                 Print(("slot %d: %s set to %s."):format(slot, top.name, top.sub or "the latest rank"))
             end
         end
+    end
+    if ownRun then
+        ProbeWatch(ownRun)
+        ProbeEnd()
     end
 end
 
@@ -276,6 +400,10 @@ local function CaptureSlots()
             entry.latest = IsLatest(slot) or nil
             slots[slot] = entry
             count = count + 1
+            ProbeLine("capture slot %d: %s name=%s rank=%s latest=%s text=%s", slot, ActionText(slot),
+                tostring(entry.name), tostring(entry.rank), tostring(entry.latest), tostring(Safe(GetActionText(slot))))
+        elseif actionType or id then
+            ProbeLine("capture slot %d: SKIPPED type=%s id=%s (secret or incomplete)", slot, tostring(actionType), tostring(id))
         end
     end
     return slots, count
@@ -309,59 +437,183 @@ local function MacroIndexByName(name)
     end
 end
 
--- Returns a pickup function for a saved slot entry, or nil if it cannot be restored.
+-- Returns a pickup function for a saved slot entry (nil if it cannot be restored) and how it was resolved.
 local function PickupForEntry(entry, best, byID)
     if entry.t == "spell" then
         local known = byID[entry.id]
         local top = entry.name and best[entry.name]
-        if top and (not known or (entry.latest and top.rank > known.rank)) then known = top end
-        if known then return PickupRank(known) end
-        if IsSpellKnown and IsSpellKnown(entry.id) then
-            return function() C_Spell.PickupSpell(entry.id) end
+        local how = known and "same id" or "not in book"
+        if top and (not known or (entry.latest and top.rank > known.rank)) then
+            known = top
+            how = how .. ", by name -> best rank"
         end
+        if known then
+            return PickupRank(known), ("%s: book#%s id %s r%s"):format(how, tostring(known.index), tostring(known.spellID), tostring(known.rank))
+        end
+        if IsSpellKnown and IsSpellKnown(entry.id) then
+            return function() C_Spell.PickupSpell(entry.id) end, "IsSpellKnown -> C_Spell.PickupSpell"
+        end
+        -- Not known right now (other talents, rune not engraved): try the id anyway; the caller sees an empty cursor.
+        return function() C_Spell.PickupSpell(entry.id) end, "spell not known, trying C_Spell.PickupSpell"
     elseif entry.t == "item" then
-        return PickupItemFn(entry.id)
+        return PickupItemFn(entry.id), "C_Item.PickupItem " .. tostring(entry.id)
     elseif entry.t == "macro" then
         local index = MacroIndexByName(entry.name)
-        if index then return PickupMacroFn(index) end
+        if index then return PickupMacroFn(index), "macro by name -> index " .. index end
+        return nil, "no macro named " .. tostring(entry.name)
     elseif entry.t == "flyout" then
         local index = FindFlyoutIndex(entry.id)
-        if index then return function() C_SpellBook.PickupSpellBookItem(index, BANK) end end
+        if index then return function() C_SpellBook.PickupSpellBookItem(index, BANK) end, "flyout book#" .. index end
+        return nil, "flyout not in book"
     elseif entry.t == "equipmentset" and C_EquipmentSet then
         local setID = C_EquipmentSet.GetEquipmentSetID(entry.id)
-        if setID then return function() C_EquipmentSet.PickupEquipmentSet(setID) end end
+        if setID then return function() C_EquipmentSet.PickupEquipmentSet(setID) end, "equipment set " .. setID end
+        return nil, "no equipment set " .. tostring(entry.id)
     end
+    return nil, "unsupported action type " .. tostring(entry.t)
 end
 
-local function ApplyLoadout(loadout)
+local function EntryText(entry)
+    return ("%s:%s name=%s rank=%s latest=%s"):format(tostring(entry.t), tostring(entry.id), tostring(entry.name),
+        tostring(entry.rank), tostring(entry.latest))
+end
+
+-- Spells of a loadout that the character does not know yet (other talents, runes): their slot is left empty and
+-- filled as soon as the spell is learned. CharDB.pending = { loadout = name, slots = { [slot] = entry } }.
+local function PendingCount()
+    local n = 0
+    for _ in pairs(CharDB.pending and CharDB.pending.slots or {}) do n = n + 1 end
+    return n
+end
+
+local function PendingNames()
+    local names = {}
+    for slot, entry in pairs(CharDB.pending and CharDB.pending.slots or {}) do
+        names[#names + 1] = ("%s (slot %d)"):format(tostring(entry.name or entry.id), slot)
+    end
+    table.sort(names)
+    return names
+end
+
+local function ApplyLoadout(loadout, reason)
     if CombatBlocked() then return end
+    local run = ProbeBegin("apply", ("%s (%s)"):format(loadout.name, reason or "apply"))
     local _, best, byID = ReadSpellbook()
-    local placed, cleared, missing = 0, 0, {}
+    local placed, cleared, missing, waiting = 0, 0, {}, {}
+    local expected = {}
+    local pending = { loadout = loadout.name, slots = {} }
     for slot = 1, MAX_SLOT do
         local entry = loadout.slots[slot]
+        local before = run and ActionText(slot)
         local actionType = Safe(GetActionInfo(slot))
         SetLatest(slot, entry and entry.latest)
         if entry then
-            local pickup = PickupForEntry(entry, best, byID)
-            if pickup and PlaceInto(slot, pickup) then
+            local pickup, how = PickupForEntry(entry, best, byID)
+            local ok, cursor, swapped = false, nil, nil
+            if pickup then ok, cursor, swapped = PlaceInto(slot, pickup) end
+            local result = ok and "PLACED" or (pickup and "NOCURSOR" or "UNRESOLVED")
+            if ok then
                 placed = placed + 1
+            elseif entry.t == "spell" or entry.t == "flyout" then
+                -- The old action must not stay in a slot that belongs to another spell; wait for the spell instead.
+                if actionType then ClearSlot(slot) end
+                pending.slots[slot] = entry
+                waiting[#waiting + 1] = entry.name or tostring(entry.id)
+                result = result .. " -> cleared, waits until learned"
             else
                 missing[#missing + 1] = entry.name or (entry.t .. " " .. tostring(entry.id))
+            end
+            if run then
+                local after = ActionText(slot)
+                expected[slot] = after
+                ProbeLine("slot %d: %s | want %s | %s | cursor=%s | now=%s | swapped=%s | %s", slot, before, EntryText(entry),
+                    how, tostring(cursor), after, tostring(swapped), result)
             end
         elseif actionType then
             ClearSlot(slot)
             cleared = cleared + 1
+            if run then
+                local after = ActionText(slot)
+                expected[slot] = after
+                ProbeLine("slot %d: %s | not in loadout -> clear | now=%s | %s", slot, before, after,
+                    after == "empty" and "CLEARED" or "STILL SET")
+            end
         end
     end
+    CharDB.pending = next(pending.slots) and pending or nil
     Print(("loadout \"%s\" applied: %d placed, %d cleared."):format(loadout.name, placed, cleared))
+    if #waiting > 0 then
+        table.sort(waiting)
+        Print(("not known yet, placed as soon as you learn them (e.g. after switching talents): %s"):format(table.concat(waiting, ", ")))
+    end
     if #missing > 0 then
         Print("not available: " .. table.concat(missing, ", "))
+    end
+    if run then
+        ProbeLine("summary: %d placed, %d cleared, %d waiting, %d missing, cursor at end=%s", placed, cleared, #waiting, #missing, CursorText())
+        ProbeWatch(run)
+        ProbeVerify(run, expected)
+        ProbeEnd()
+    end
+end
+
+-- Places waiting spells that are known now. A slot the player filled in the meantime is left alone and forgotten.
+local function FillPending(reason)
+    local pending = CharDB.pending
+    if not pending or not next(pending.slots) then return end
+    if InCombatLockdown() then return end
+    local run = ProbeBegin("pending", reason or "?")
+    local _, best, byID = ReadSpellbook()
+    local filled = {}
+    for slot, entry in pairs(pending.slots) do
+        local now = ActionText(slot)
+        if now ~= "empty" then
+            pending.slots[slot] = nil
+            ProbeLine("slot %d: %s waited, but the slot holds %s now -> forgotten", slot, tostring(entry.name), now)
+        else
+            local known = byID[entry.id] or (entry.name and best[entry.name])
+            if known then
+                local ok, cursor = PlaceInto(slot, PickupForEntry(entry, best, byID))
+                ProbeLine("slot %d: %s known now -> cursor=%s now=%s ok=%s", slot, tostring(entry.name), tostring(cursor),
+                    run and ActionText(slot) or "", tostring(ok))
+                if ok then
+                    pending.slots[slot] = nil
+                    filled[#filled + 1] = entry.name or tostring(entry.id)
+                end
+            end
+        end
+    end
+    if not next(pending.slots) then CharDB.pending = nil end
+    if #filled > 0 then
+        table.sort(filled)
+        Print(("loadout \"%s\": placed %s."):format(tostring(pending.loadout), table.concat(filled, ", ")))
+    end
+    if run then
+        ProbeLine("filled %d, still waiting %d", #filled, PendingCount())
+        ProbeWatch(run)
+        ProbeEnd()
     end
 end
 
 local function SaveLoadout(name, existing)
     if CombatBlocked() then return end
+    local run = ProbeBegin("save", ("%s (%s)"):format(name or "?", existing and "overwrite" or "new"))
     local slots, count = CaptureSlots()
+    -- Spells of this loadout that still wait to be learned keep their slot (it is empty on the bars right now).
+    local pending = CharDB.pending
+    if pending and existing and pending.loadout == existing.name then
+        for slot, entry in pairs(pending.slots) do
+            if not slots[slot] then
+                slots[slot] = entry
+                count = count + 1
+                ProbeLine("slot %d: kept waiting %s", slot, tostring(entry.name))
+            end
+        end
+    end
+    if run then
+        ProbeLine("captured %d slots", count)
+        ProbeEnd()
+    end
     local loadout = existing
     if not loadout then
         loadout = { name = name }
@@ -393,9 +645,14 @@ end
 
 local function StartEdit(loadout)
     if CombatBlocked() then return end
+    local run = ProbeBegin("edit-start backup", loadout.name)
     local backup = CaptureSlots()
-    if CharDB.editing then backup = CharDB.editing.backup end -- switching loadouts keeps the original bars
-    ApplyLoadout(loadout)
+    if CharDB.editing then
+        ProbeLine("already editing %s: keeping its backup instead", tostring(CharDB.editing.name))
+        backup = CharDB.editing.backup -- switching loadouts keeps the original bars
+    end
+    if run then ProbeEnd() end
+    ApplyLoadout(loadout, "edit start")
     CharDB.editing = { name = loadout.name, backup = backup }
     Print(("editing \"%s\": change your action bars, then use the minimap button to save or cancel."):format(loadout.name))
 end
@@ -410,7 +667,7 @@ end
 local function CancelEdit()
     local editing = CharDB.editing
     if not editing or CombatBlocked() then return end
-    ApplyLoadout({ name = "bars before editing", slots = editing.backup or {} })
+    ApplyLoadout({ name = "bars before editing", slots = editing.backup or {} }, "cancel edit")
     StopEditing()
 end
 
@@ -418,6 +675,10 @@ local function DeleteLoadout(loadout)
     local list = Loadouts()
     for i, l in ipairs(list) do
         if l == loadout then
+            if ProbeBegin("delete", loadout.name) then
+                ProbeLine("deleting %s (%d of %d), editing=%s", loadout.name, i, #list, tostring(CharDB.editing and CharDB.editing.name))
+                ProbeEnd()
+            end
             if EditingLoadout() == loadout then StopEditing() end
             table.remove(list, i)
             Print(("loadout \"%s\" deleted."):format(loadout.name))
@@ -606,6 +867,17 @@ local function BuildLoadoutMenu(_, root)
         root:CreateButton("Cancel editing (restore previous bars)", CancelEdit)
         root:CreateDivider()
     end
+    local waiting = PendingCount()
+    if waiting > 0 then
+        local w = root:CreateButton(("|cffffd100%d spell(s) of \"%s\" wait to be learned|r"):format(waiting, tostring(CharDB.pending.loadout)))
+        w:SetTooltip(function(tooltip)
+            GameTooltip_SetTitle(tooltip, "Waiting spells")
+            GameTooltip_AddNormalLine(tooltip, "They go into their slot as soon as you know them (switch talents, engrave runes). A slot you fill yourself is no longer waited for.", true)
+            for _, name in ipairs(PendingNames()) do GameTooltip_AddNormalLine(tooltip, name) end
+        end)
+        w:CreateButton("Stop waiting for them", function() CharDB.pending = nil end)
+        root:CreateDivider()
+    end
     root:CreateButton("New loadout from current bars...", NewLoadoutDialog)
     local list = {}
     for _, loadout in ipairs(Loadouts()) do list[#list + 1] = loadout end
@@ -783,16 +1055,17 @@ local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+frame:RegisterEvent("SPELLS_CHANGED")
 pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_SKILL_LINE")
 pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_TAB")
 
-local upgradeTimer
+local upgradeTimer, pendingTimer
 local function ScheduleUpgrade()
     if not CharDB or not next(CharDB.latest) then return end
     if upgradeTimer then upgradeTimer:Cancel() end
     upgradeTimer = C_Timer.NewTimer(1, function()
         upgradeTimer = nil
-        UpgradeRanks()
+        UpgradeRanks(nil, "learned a spell")
     end)
 end
 
@@ -802,6 +1075,8 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         DB = ActionSlotPickerDB
         DB.loadouts = DB.loadouts or {}
         DB.minimap = DB.minimap or {}
+        DB.probe = DB.probe or {}
+        DB.probe.runs = DB.probe.runs or {}
         DB.autoRank = nil -- 0.1.0 had one account-wide switch; it is per slot now
         ActionSlotPickerCharDB = ActionSlotPickerCharDB or {}
         CharDB = ActionSlotPickerCharDB
@@ -812,13 +1087,135 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         if EditingLoadout() then
             Print(("still editing loadout \"%s\" - save or cancel it with the minimap button."):format(CharDB.editing.name))
         end
+        if ProbeOn() then
+            ProbeSnapshot("login")
+            Print("probe is ON (/asp probe off to stop recording).")
+        end
     elseif event == "PLAYER_REGEN_ENABLED" then
         if needHook and HookButtons() then needHook = false end
-        if pendingUpgrade then UpgradeRanks() end
+        if pendingUpgrade then UpgradeRanks(nil, "after combat") end
+        FillPending("after combat")
+    elseif event == "SPELLS_CHANGED" then
+        if CharDB and CharDB.pending then
+            if pendingTimer then pendingTimer:Cancel() end
+            pendingTimer = C_Timer.NewTimer(0.5, function()
+                pendingTimer = nil
+                FillPending("spells changed")
+            end)
+        end
     elseif event == "LEARNED_SPELL_IN_SKILL_LINE" or event == "LEARNED_SPELL_IN_TAB" then
         ScheduleUpgrade()
     end
 end)
+
+-- Probe commands -------------------------------------------------------
+
+-- Current state: saved loadouts, edit mode, latest-rank slots, which button shows which slot, every filled slot.
+local function ProbeSnapshot(kind)
+    local run = ProbeBegin(kind, "state")
+    if not run then return end
+    for class, list in pairs(DB.loadouts) do
+        local names = {}
+        for _, l in ipairs(list) do
+            local n = 0
+            for _ in pairs(l.slots or {}) do n = n + 1 end
+            names[#names + 1] = ("%s(%d slots, %s)"):format(tostring(l.name), n, tostring(l.saved))
+        end
+        ProbeLine("loadouts %s: %s", class, #names > 0 and table.concat(names, "; ") or "none")
+    end
+    local editing = CharDB.editing
+    ProbeLine("editing: %s (backup %s)", tostring(editing and editing.name),
+        editing and editing.backup and "present" or "none")
+    local flagged = {}
+    for slot in pairs(CharDB.latest) do flagged[#flagged + 1] = slot end
+    table.sort(flagged)
+    ProbeLine("latest-rank slots: %s", #flagged > 0 and table.concat(flagged, ",") or "none")
+    ProbeLine("waiting spells (%s): %s", tostring(CharDB.pending and CharDB.pending.loadout),
+        PendingCount() > 0 and table.concat(PendingNames(), ", ") or "none")
+    local names = (ActionButtonUtil and ActionButtonUtil.ActionBarButtonNames) or {}
+    for _, prefix in ipairs(names) do
+        local map = {}
+        for i = 1, NUM_ACTIONBAR_BUTTONS or 12 do
+            local button = _G[prefix .. i]
+            if button then
+                map[#map + 1] = tostring(Safe(button.action)) .. (button:IsVisible() and "" or "h")
+            end
+        end
+        ProbeLine("buttons %s: %s", prefix, #map > 0 and table.concat(map, " ") or "missing")
+    end
+    for slot = 1, MAX_SLOT do
+        local text = ActionText(slot)
+        if text ~= "empty" then
+            ProbeLine("bar slot %d: %s text=%s", slot, text, tostring(Safe(GetActionText(slot))))
+        end
+    end
+    ProbeEnd()
+end
+
+-- Dry run for one loadout: resolve every slot and pick it up, but never place anything.
+local function ProbeCheck(name)
+    local loadout = name and name ~= "" and FindLoadout(name)
+    if not loadout then
+        Print(("no loadout \"%s\" for this class."):format(tostring(name)))
+        return
+    end
+    if CombatBlocked() then return end
+    local run = ProbeBegin("check", loadout.name)
+    if not run then return end
+    local _, best, byID = ReadSpellbook()
+    local same, differ = 0, 0
+    for slot = 1, MAX_SLOT do
+        local entry = loadout.slots[slot]
+        local now = ActionText(slot)
+        if entry then
+            local pickup, how = PickupForEntry(entry, best, byID)
+            local cursor = "not picked"
+            if pickup then
+                ClearCursor()
+                pickup()
+                cursor = CursorText()
+                ClearCursor()
+            end
+            local match = now == (entry.t .. ":" .. tostring(entry.id)) or now:find("^" .. entry.t .. ":" .. tostring(entry.id) .. "/")
+            if match then same = same + 1 else differ = differ + 1 end
+            ProbeLine("slot %d: want %s | %s | cursor=%s | bars now %s | %s", slot, EntryText(entry), tostring(how), cursor, now,
+                match and "SAME" or "DIFFERENT")
+        elseif now ~= "empty" then
+            differ = differ + 1
+            ProbeLine("slot %d: not in loadout | bars now %s | DIFFERENT", slot, now)
+        end
+    end
+    ProbeLine("summary: %d slots match the bars, %d differ", same, differ)
+    ProbeEnd()
+    Print(("probe check \"%s\": %d slots match the bars, %d differ. /reload writes the probe to disk."):format(loadout.name, same, differ))
+end
+
+local function ProbeCommand(rest)
+    local sub, arg = rest:match("^(%S*)%s*(.-)$")
+    sub = (sub or ""):lower()
+    if sub == "on" then
+        DB.probe.enabled = true
+        ProbeSnapshot("probe on")
+        Print("probe ON: every loadout step is recorded. Reproduce the problem, then /reload so it is written to disk.")
+    elseif sub == "off" then
+        DB.probe.enabled = nil
+        Print("probe OFF (recorded runs are kept, /asp probe clear deletes them).")
+    elseif sub == "clear" then
+        DB.probe.runs = {}
+        Print("probe runs deleted.")
+    elseif sub == "bars" then
+        if not ProbeOn() then Print("switch the probe on first: /asp probe on") return end
+        ProbeSnapshot("bars")
+        Print("probe: current bars recorded.")
+    elseif sub == "check" then
+        if not ProbeOn() then Print("switch the probe on first: /asp probe on") return end
+        ProbeCheck(arg)
+    else
+        Print(("probe is %s, %d runs recorded."):format(ProbeOn() and "ON" or "OFF", #DB.probe.runs))
+        Print("/asp probe on|off - record loadout steps   /asp probe bars - record the current bars")
+        Print("/asp probe check <loadout> - dry run, places nothing   /asp probe clear - delete runs")
+    end
+end
 
 SLASH_ACTIONSLOTPICKER1 = "/asp"
 SlashCmdList.ACTIONSLOTPICKER = function(msg)
@@ -842,6 +1239,8 @@ SlashCmdList.ACTIONSLOTPICKER = function(msg)
     elseif cmd == "load" and rest ~= "" then
         local loadout = FindLoadout(rest)
         if loadout then ApplyLoadout(loadout) else Print(("no loadout \"%s\"."):format(rest)) end
+    elseif cmd == "probe" then
+        ProbeCommand(rest)
     elseif cmd == "list" then
         local list = Loadouts()
         if #list == 0 then Print("no loadouts for this class yet.") end
@@ -851,6 +1250,7 @@ SlashCmdList.ACTIONSLOTPICKER = function(msg)
     else
         Print("Shift + right-click an action button to open the picker. Minimap button or /asp: loadouts.")
         Print("/asp minimap - show or hide the minimap button")
+        Print("/asp probe - diagnostics for loadouts (records every step, see /asp probe)")
         Print("/asp rank - list the slots that follow the latest spell rank (switch it in the slot's menu)")
         Print("/asp save <name> | /asp load <name> | /asp list - action bar loadouts")
     end
