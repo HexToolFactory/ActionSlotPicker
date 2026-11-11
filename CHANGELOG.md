@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.2.2
+- Fix: Lua error at login ("attempt to call a nil value") while the loadout probe was switched on.
+
 ## 0.2.1
 - Loadouts: spells the character does not know when a loadout is applied (other talents, runes) no longer leave the
   old action in their slot. The slot is cleared and the spell is placed as soon as it is learned; the minimap menu shows

@@ -1051,6 +1051,7 @@ end
 ------------------------------------------------------------------------
 
 local needHook = true
+local ProbeSnapshot -- defined with the probe commands below; the login handler needs it
 local frame = CreateFrame("Frame")
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_LOGIN")
@@ -1111,7 +1112,7 @@ end)
 -- Probe commands -------------------------------------------------------
 
 -- Current state: saved loadouts, edit mode, latest-rank slots, which button shows which slot, every filled slot.
-local function ProbeSnapshot(kind)
+function ProbeSnapshot(kind) -- assigns the local declared before the event handler
     local run = ProbeBegin(kind, "state")
     if not run then return end
     for class, list in pairs(DB.loadouts) do
