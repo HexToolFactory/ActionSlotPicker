@@ -5,7 +5,7 @@
 
 local _, NS = ...
 
-local WIDTH, HEIGHT = 760, 500
+local WIDTH, HEIGHT = 780, 500
 local LIST_WIDTH = 180
 local ICON, GAP = 30, 3
 local ROW_LABEL = 64
@@ -551,7 +551,8 @@ local function CreateWindow()
 
     local apply = Button(d, "Apply", 80, WithSelected(function(l) NS.ApplyLoadout(l) end),
         "Puts this loadout on all bars and equips its set.")
-    apply:SetPoint("TOPLEFT", d.info, "BOTTOMLEFT", 0, -8)
+    -- Button rows start at the left edge of the details, below the macro icon (not under the name, which is indented).
+    apply:SetPoint("TOPLEFT", d, "TOPLEFT", 0, -46)
     d.edit = Button(d, "Edit on bars", 100, WithSelected(NS.StartEdit),
         "Puts it on the bars to change them there. Save edit keeps the bars, Cancel edit restores the old bars.")
     d.edit:SetPoint("LEFT", apply, "RIGHT", 4, 0)

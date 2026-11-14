@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+- Fix: in the loadout window the Spec button reached past the right edge of the window. The button rows start
+  at the left edge again and the window is a little wider.
+
 ## 1.0.0
 - First stable release. Same features as 0.3.0: slot picker with spell rank options (latest, -1, -2), loadout window,
   loadout macro for your bars, loadouts per talent spec, equipment sets on loadouts and prompts to save bar and gear
