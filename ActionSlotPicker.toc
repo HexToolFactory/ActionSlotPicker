@@ -2,7 +2,7 @@
 ## Title: Action Slot Picker
 ## Version: @project-version@
 ## Author: HexToolFactory
-## Notes: Shift + right-click an action button to pick a spell (by spec and rank), bag item or macro for that slot. Per slot: keep the spell at the latest rank you know. Action bar loadouts.
+## Notes: Shift + right-click an action button to pick a spell (by spec and rank), bag item or macro for that slot. Per slot: spell rank latest, latest -1 or latest -2. Action bar loadouts with their own window.
 ## X-Curse-Project-ID: 1787162
 ## Category: Action Bars
 ## SavedVariables: ActionSlotPickerDB
@@ -10,3 +10,4 @@
 ## DefaultState: Enabled
 
 ActionSlotPicker.lua
+LoadoutUI.lua

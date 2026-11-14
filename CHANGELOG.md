@@ -1,7 +1,16 @@
 # Changelog
 
 ## 0.3.0
-- Loadouts can equip an equipment set: minimap menu -> loadout -> "Equipment set". Applying the loadout equips it;
+- New loadout window: click the minimap button or type `/asp`. List of the class's loadouts on the left; Apply,
+  Edit on bars, Overwrite from bars, Rename, Copy, Delete and the equipment set on the right, plus every slot bar by
+  bar. Click a slot to pick its spell, item or macro or its rank option; drop a spell, item or macro onto a slot.
+  Slots that are not available on this character are red, spells waiting to be learned yellow. Right-click on the
+  minimap button (or `/asp menu`) still opens the quick menu.
+- Spell rank per slot: Keep this rank, Latest, Latest -1 or Latest -2 (submenu "Spell rank" in the slot menu,
+  replaces the checkbox). Latest -1 / -2 follow one or two ranks below the highest known rank, also after learning
+  a new one. Loadouts save this option per slot. Old "latest" settings carry over.
+- Loadouts can be copied.
+- Loadouts can equip an equipment set (loadout window or quick menu -> loadout -> "Equipment set"). Applying the loadout equips it;
   cancelling an edit puts the set back that was worn before. Sets are bound by name, so every character of the class
   with a set of that name can use it.
 - Fix: Lua error at login ("attempt to call a nil value") while the loadout probe was switched on.
