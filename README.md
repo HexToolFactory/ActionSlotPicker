@@ -14,6 +14,9 @@ WoW: Forever addon for filling action bars without dragging things out of the sp
 overwrite, rename, delete. Loadouts are stored per class for the whole account; spells and macros are matched by name.
 Drag the button to move it around the minimap.
 
+Each loadout can equip an equipment set from the character window's Equipment Manager (loadout -> "Equipment set").
+The set is bound by name, so every character of the class with a set of that name uses it.
+
 Spells of a loadout that your character does not know right now (other talents, runes) leave their slot empty and are
 placed automatically as soon as you learn them, for example after switching talents. The minimap menu lists them
 while they wait.

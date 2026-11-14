@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.2.2
+## 0.3.0
+- Loadouts can equip an equipment set: minimap menu -> loadout -> "Equipment set". Applying the loadout equips it;
+  cancelling an edit puts the set back that was worn before. Sets are bound by name, so every character of the class
+  with a set of that name can use it.
 - Fix: Lua error at login ("attempt to call a nil value") while the loadout probe was switched on.
 - Fix: switching loadouts ignored the "Update spell rank to the latest available" option of a slot. The option now
   belongs to the slot: a slot with it gets the highest known rank from every loadout, and applying a loadout no longer

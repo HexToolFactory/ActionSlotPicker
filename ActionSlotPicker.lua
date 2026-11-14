@@ -380,6 +380,54 @@ local function Loadouts()
     return DB.loadouts[key]
 end
 
+-- Equipment sets bound to loadouts. Bound by name: set IDs differ per character, loadouts are shared per class.
+local function EquipmentSets()
+    local sets = {}
+    if not (C_EquipmentSet and C_EquipmentSet.GetEquipmentSetIDs) then return sets end
+    for _, setID in ipairs(C_EquipmentSet.GetEquipmentSetIDs() or {}) do
+        local name, icon, _, isEquipped, _, _, _, numLost = C_EquipmentSet.GetEquipmentSetInfo(setID)
+        if name then
+            sets[#sets + 1] = { name = name, icon = icon, setID = setID, equipped = isEquipped, lost = numLost }
+        end
+    end
+    table.sort(sets, ByLabel)
+    return sets
+end
+
+local function FindEquipmentSet(name)
+    for _, set in ipairs(EquipmentSets()) do
+        if set.name == name then return set end
+    end
+end
+
+local function EquippedSetName()
+    for _, set in ipairs(EquipmentSets()) do
+        if set.equipped then return set.name end
+    end
+end
+
+-- Equips the set bound to a loadout. Called out of combat only (ApplyLoadout checks).
+local function EquipBoundSet(name)
+    if not name then return end
+    local set = FindEquipmentSet(name)
+    if not set then
+        Print(("no equipment set \"%s\" on this character."):format(name))
+        ProbeLine("equipment set %s: not on this character", name)
+        return
+    end
+    if set.equipped then
+        ProbeLine("equipment set %s: already equipped", name)
+        return
+    end
+    local ok = C_EquipmentSet.UseEquipmentSet(set.setID)
+    ProbeLine("equipment set %s (id %s): UseEquipmentSet -> %s, items lost %s", name, tostring(set.setID), tostring(ok), tostring(set.lost))
+    if ok then
+        Print(("equipped \"%s\"."):format(name))
+    else
+        Print(("could not equip \"%s\"."):format(name))
+    end
+end
+
 local function CaptureSlots()
     local _, _, byID = ReadSpellbook()
     local slots, count = {}, 0
@@ -546,6 +594,7 @@ local function ApplyLoadout(loadout, reason)
     end
     CharDB.pending = next(pending.slots) and pending or nil
     Print(("loadout \"%s\" applied: %d placed, %d cleared."):format(loadout.name, placed, cleared))
+    EquipBoundSet(loadout.equipmentSet)
     if #waiting > 0 then
         table.sort(waiting)
         Print(("not known yet, placed as soon as you learn them (e.g. after switching talents): %s"):format(table.concat(waiting, ", ")))
@@ -651,13 +700,16 @@ local function StartEdit(loadout)
     if CombatBlocked() then return end
     local run = ProbeBegin("edit-start backup", loadout.name)
     local backup = CaptureSlots()
+    local backupSet = EquippedSetName()
     if CharDB.editing then
         ProbeLine("already editing %s: keeping its backup instead", tostring(CharDB.editing.name))
-        backup = CharDB.editing.backup -- switching loadouts keeps the original bars
+        backup = CharDB.editing.backup -- switching loadouts keeps the original bars and gear
+        backupSet = CharDB.editing.backupSet
     end
+    ProbeLine("equipment set before editing: %s", tostring(backupSet))
     if run then ProbeEnd() end
     ApplyLoadout(loadout, "edit start")
-    CharDB.editing = { name = loadout.name, backup = backup }
+    CharDB.editing = { name = loadout.name, backup = backup, backupSet = backupSet }
     Print(("editing \"%s\": change your action bars, then use the minimap button to save or cancel."):format(loadout.name))
 end
 
@@ -671,7 +723,7 @@ end
 local function CancelEdit()
     local editing = CharDB.editing
     if not editing or CombatBlocked() then return end
-    ApplyLoadout({ name = "bars before editing", slots = editing.backup or {} }, "cancel edit")
+    ApplyLoadout({ name = "bars before editing", slots = editing.backup or {}, equipmentSet = editing.backupSet }, "cancel edit")
     StopEditing()
 end
 
@@ -860,6 +912,38 @@ local function AddMacros(root, slot)
     AddMacroList(macrosDesc, "Character-specific", character, slot)
 end
 
+-- "Equipment set" submenu of a loadout: None or one of this character's sets (radio buttons).
+local function AddEquipmentSetMenu(parent, loadout)
+    local label = "Equipment set: " .. (loadout.equipmentSet or "none")
+    local desc = parent:CreateButton(label)
+    local function Bind(name)
+        loadout.equipmentSet = name
+        Print(name and ("loadout \"%s\" equips \"%s\"."):format(loadout.name, name)
+            or ("loadout \"%s\" equips no set."):format(loadout.name))
+    end
+    desc:CreateRadio("None", function() return loadout.equipmentSet == nil end, function() Bind(nil) end)
+    local sets = EquipmentSets()
+    local found = false
+    for _, set in ipairs(sets) do
+        if set.name == loadout.equipmentSet then found = true end
+        local r = desc:CreateRadio(Icon(set.icon) .. set.name,
+            function() return loadout.equipmentSet == set.name end, function() Bind(set.name) end)
+        r:SetTooltip(function(tooltip)
+            GameTooltip_SetTitle(tooltip, set.name)
+            if set.equipped then GameTooltip_AddNormalLine(tooltip, "Equipped now") end
+            if (set.lost or 0) > 0 then GameTooltip_AddNormalLine(tooltip, ("%d item(s) missing"):format(set.lost)) end
+        end)
+    end
+    if loadout.equipmentSet and not found then
+        -- Bound on another character of this class; keep it selectable so it is not lost by accident.
+        desc:CreateRadio(("|cff999999%s (not on this character)|r"):format(loadout.equipmentSet),
+            function() return true end, function() end)
+    end
+    if #sets == 0 then
+        desc:CreateTitle("Create sets in the character window")
+    end
+end
+
 -- Loadout menu (minimap button): loadouts always cover all action bars together.
 local function BuildLoadoutMenu(_, root)
     root:CreateTitle("Action bar loadouts")
@@ -894,9 +978,11 @@ local function BuildLoadoutMenu(_, root)
         l:SetTooltip(function(tooltip)
             GameTooltip_SetTitle(tooltip, loadout.name)
             GameTooltip_AddNormalLine(tooltip, ("%d slots, saved %s"):format(CountSlots(loadout), loadout.saved or "?"))
+            GameTooltip_AddNormalLine(tooltip, "Equipment set: " .. (loadout.equipmentSet or "none"))
         end)
         l:CreateButton("Apply", function() ApplyLoadout(loadout) end)
         l:CreateButton("Edit", function() StartEdit(loadout) end)
+        AddEquipmentSetMenu(l, loadout)
         l:CreateButton("Overwrite with current bars", function()
             Confirm(("Overwrite loadout \"%s\" with the current bars?"):format(loadout.name), function()
                 SaveLoadout(loadout.name, loadout)
@@ -1124,7 +1210,7 @@ function ProbeSnapshot(kind) -- assigns the local declared before the event hand
         for _, l in ipairs(list) do
             local n = 0
             for _ in pairs(l.slots or {}) do n = n + 1 end
-            names[#names + 1] = ("%s(%d slots, %s)"):format(tostring(l.name), n, tostring(l.saved))
+            names[#names + 1] = ("%s(%d slots, %s, set %s)"):format(tostring(l.name), n, tostring(l.saved), tostring(l.equipmentSet))
         end
         ProbeLine("loadouts %s: %s", class, #names > 0 and table.concat(names, "; ") or "none")
     end
