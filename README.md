@@ -17,6 +17,12 @@ is shown bar by bar: click a slot to pick its spell, item or macro or its spell 
 are not available on this character, yellow ones wait to be learned. Loadouts are stored per class for the whole
 account; spells and macros are matched by name. Right-click the minimap button for a quick menu; drag it to move it.
 
+**Loadout macro**: drag the book icon next to the loadout's name onto an action bar. Clicking that button applies the
+loadout (`/asp load <name>`, created as a character macro the first time).
+
+**Talent spec**: bind a loadout to Spec 1 or Spec 2 ("Spec" button in the window). Switching to that spec applies the
+loadout. This is stored per character, so each character of the class can use its own loadouts for its specs.
+
 The loadout you applied or saved last is the **active** one. When you change your bars afterwards, a prompt asks
 whether to save them into it; when your gear changes and the active loadout has an equipment set, a prompt asks
 whether to save the gear into that set. Switch either prompt off in the loadout window.

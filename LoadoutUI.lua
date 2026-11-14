@@ -357,6 +357,7 @@ local function RefreshDetails(loadout)
     if unknown > 0 then info = info .. (" - |cffff6060%d not available|r"):format(unknown) end
     d.info:SetText(info)
     d.setButton:SetText("Equipment set: " .. (loadout.equipmentSet or "none"))
+    d.specButton:SetText("Spec: " .. NS.SpecText(NS.SpecOf(loadout)))
 
     local isEditing = editing == loadout
     d.edit:SetShown(not isEditing)
@@ -513,7 +514,36 @@ local function CreateWindow()
     frame.noSelection:SetText("Save your bars with \"New from bars\".")
 
     d.name = d:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    d.name:SetPoint("TOPLEFT", 0, -4)
+    -- Drag this onto an action bar: a macro that applies the loadout
+    d.macro = CreateFrame("Button", nil, d)
+    d.macro:SetSize(36, 36)
+    d.macro:SetPoint("TOPLEFT", 0, -2)
+    d.macro.icon = d.macro:CreateTexture(nil, "ARTWORK")
+    d.macro.icon:SetAllPoints()
+    d.macro.icon:SetTexture("Interface\\Icons\\INV_Misc_Book_09")
+    d.macro:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+    d.macro:RegisterForDrag("LeftButton")
+    local function PickupMacroOfSelected()
+        local loadout = Selected()
+        if loadout then
+            GameTooltip:Hide()
+            NS.PickupLoadoutMacro(loadout)
+        end
+    end
+    d.macro:SetScript("OnDragStart", PickupMacroOfSelected)
+    d.macro:SetScript("OnClick", PickupMacroOfSelected)
+    d.macro:SetScript("OnEnter", function(self)
+        local loadout = Selected()
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip_SetTitle(GameTooltip, "Loadout macro")
+        GameTooltip_AddNormalLine(GameTooltip, "Drag onto an action bar: clicking it applies this loadout.", true)
+        if loadout then GameTooltip_AddNormalLine(GameTooltip, "/asp load " .. loadout.name) end
+        GameTooltip_AddInstructionLine(GameTooltip, "Created as a character macro the first time.")
+        GameTooltip:Show()
+    end)
+    d.macro:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    d.name:SetPoint("TOPLEFT", 44, -4)
     d.name:SetPoint("RIGHT", -4, 0)
     d.name:SetJustifyH("LEFT")
     d.info = d:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -547,6 +577,17 @@ local function CreateWindow()
     d.setButton = Button(d, "Equipment set: none", 210, nil,
         "Equipped together with this loadout. Bound by name, so each character of the class can have its own set.")
     d.setButton:SetPoint("LEFT", delete, "RIGHT", 4, 0)
+    d.specButton = Button(d, "Spec: none", 110, nil,
+        "Talent spec of this character that uses this loadout: switching to it applies the loadout.")
+    d.specButton:SetPoint("LEFT", overwrite, "RIGHT", 4, 0)
+    d.specButton:SetScript("OnClick", function(self)
+        local loadout = Selected()
+        if not loadout then return end
+        MenuUtil.CreateContextMenu(self, function(_, root)
+            root:CreateTitle("Talent spec")
+            NS.AddSpecRadios(root, loadout)
+        end)
+    end)
     d.setButton:SetScript("OnClick", function(self)
         local loadout = Selected()
         if not loadout then return end

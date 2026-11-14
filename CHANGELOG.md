@@ -10,6 +10,10 @@
   replaces the checkbox). Latest -1 / -2 follow one or two ranks below the highest known rank, also after learning
   a new one. Loadouts save this option per slot. Old "latest" settings carry over.
 - Loadouts can be copied.
+- Loadout macro: drag the book icon next to the loadout's name in the window onto an action bar. It is a character
+  macro (`/asp load <name>`, created the first time) that applies the loadout; renaming the loadout updates it.
+- Talent spec per loadout ("Spec" button in the window, "Talent spec" in the quick menu): switching to that spec
+  (dual spec) applies the loadout. Stored per character, one loadout per spec.
 - Save prompts: the loadout you applied or saved last is the active one (marked in the window and the quick menu).
   When you change your action bars afterwards, a prompt asks whether to save them into it; when your gear changes
   and the active loadout has an equipment set, a prompt asks whether to save the gear into that set. "Not now" is

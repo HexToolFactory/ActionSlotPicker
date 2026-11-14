@@ -595,6 +595,8 @@ end
 
 -- The loadout the bars belong to right now (last applied or saved). Bar and gear changes against it are offered
 -- for saving (CheckBars / CheckGear). The *Declined values hold what the player said "Not now" to.
+local RenameLoadoutMacro -- defined with the loadout macro below
+
 local function SetActive(loadout)
     CharDB.active = loadout and loadout.name or nil
     CharDB.barsDeclined = nil
@@ -813,6 +815,9 @@ local function DeleteLoadout(loadout)
             table.remove(list, i)
             if CharDB.pending and CharDB.pending.loadout == loadout.name then CharDB.pending = nil end
             if CharDB.active == loadout.name then SetActive(nil) end
+            for group, name in pairs(CharDB.specLoadouts) do
+                if name == loadout.name then CharDB.specLoadouts[group] = nil end
+            end
             Print(("loadout \"%s\" deleted."):format(loadout.name))
             Changed()
             return
@@ -880,6 +885,120 @@ local function NewLoadoutDialog()
     end)
 end
 
+------------------------------------------------------------------------
+-- Loadout macro: "/asp load <name>" as a character macro, dragged from the loadout window onto a bar
+------------------------------------------------------------------------
+
+local MACRO_NAME_MAX = 16
+local MACRO_ICONS = { "INV_Misc_Book_09", 134400 } -- book; question mark as fallback
+
+local function LoadoutMacroBody(name)
+    return "/asp load " .. name
+end
+
+-- Index of this character's macro that applies the loadout, if there is one.
+local function FindLoadoutMacro(name)
+    local body = LoadoutMacroBody(name)
+    local _, numChar = GetNumMacros()
+    for i = ACCOUNT_MACROS + 1, ACCOUNT_MACROS + (numChar or 0) do
+        local _, _, text = GetMacroInfo(i)
+        if text and strtrim(text) == body then return i end
+    end
+end
+
+-- Puts the loadout macro on the cursor, creating it first if needed. Out of combat only.
+local function PickupLoadoutMacro(loadout)
+    if CombatBlocked() then return false end
+    local index = FindLoadoutMacro(loadout.name)
+    if not index then
+        local name, body = loadout.name:sub(1, MACRO_NAME_MAX), LoadoutMacroBody(loadout.name)
+        for _, icon in ipairs(MACRO_ICONS) do
+            local ok, result = pcall(CreateMacro, name, icon, body, true)
+            if ok and result then
+                index = result
+                break
+            end
+        end
+        if not index then
+            Print("could not create the macro (character macros full?).")
+            return false
+        end
+        Print(("macro \"%s\" created in your character macros."):format(name))
+    end
+    ClearCursor()
+    PickupMacro(index)
+    return GetCursorInfo() ~= nil
+end
+
+function RenameLoadoutMacro(old, new) -- declared local above RenameDialog's first use
+    local index = FindLoadoutMacro(old)
+    if index and not InCombatLockdown() then
+        pcall(EditMacro, index, new:sub(1, MACRO_NAME_MAX), nil, LoadoutMacroBody(new))
+    end
+end
+
+------------------------------------------------------------------------
+-- Talent spec (dual spec): a loadout per spec group of this character, applied when the spec switches
+------------------------------------------------------------------------
+
+local function NumSpecGroups()
+    return (GetNumSpecGroups and GetNumSpecGroups()) or 1
+end
+
+local function ActiveSpecGroup()
+    local spec = C_SpecializationInfo
+    local group = spec and spec.GetActiveSpecGroup and spec.GetActiveSpecGroup()
+    if not group and GetActiveTalentGroup then group = GetActiveTalentGroup() end
+    return Safe(group) or 1
+end
+
+local function SpecOf(loadout)
+    for group, name in pairs(CharDB.specLoadouts) do
+        if name == loadout.name then return group end
+    end
+end
+
+local function BindSpec(loadout, group)
+    for g, name in pairs(CharDB.specLoadouts) do
+        if name == loadout.name then CharDB.specLoadouts[g] = nil end
+    end
+    if group then
+        local before = CharDB.specLoadouts[group]
+        CharDB.specLoadouts[group] = loadout.name
+        Print(("spec %d uses loadout \"%s\"%s."):format(group, loadout.name,
+            before and before ~= loadout.name and (" (was \"%s\")"):format(before) or ""))
+    else
+        Print(("loadout \"%s\" is not bound to a spec."):format(loadout.name))
+    end
+    Changed()
+end
+
+local function SpecText(group)
+    if not group then return "none" end
+    return ("Spec %d"):format(group)
+end
+
+-- Radio buttons "None / Spec 1 / Spec 2" for a loadout (window button and quick menu).
+local function AddSpecRadios(desc, loadout)
+    desc:CreateRadio("None", function() return SpecOf(loadout) == nil end, function() BindSpec(loadout, nil) end)
+    local active, unlocked = ActiveSpecGroup(), NumSpecGroups()
+    for group = 1, math.max(2, unlocked) do
+        local label = SpecText(group)
+        if group == active then label = label .. " (active)" end
+        if group > unlocked then label = "|cff999999" .. label .. " (not unlocked)|r" end
+        local r = desc:CreateRadio(label, function() return SpecOf(loadout) == group end,
+            function() BindSpec(loadout, group) end)
+        r:SetTooltip(function(tooltip)
+            GameTooltip_SetTitle(tooltip, SpecText(group))
+            GameTooltip_AddNormalLine(tooltip, "Switching to this talent spec applies the loadout. Only for this character.", true)
+            local bound = CharDB.specLoadouts[group]
+            if bound and bound ~= loadout.name then
+                GameTooltip_AddNormalLine(tooltip, ("Now: \"%s\" (replaced)"):format(bound))
+            end
+        end)
+    end
+end
+
 local function RenameDialog(loadout)
     AskName(("Rename loadout \"%s\" to:"):format(loadout.name), loadout.name, function(name)
         if name == "" or name == loadout.name then return end
@@ -891,6 +1010,10 @@ local function RenameDialog(loadout)
         Print(("loadout \"%s\" renamed to \"%s\"."):format(loadout.name, name))
         if EditingLoadout() == loadout then CharDB.editing.name = name end
         if CharDB.active == loadout.name then CharDB.active = name end
+        for group, bound in pairs(CharDB.specLoadouts) do
+            if bound == loadout.name then CharDB.specLoadouts[group] = name end
+        end
+        RenameLoadoutMacro(loadout.name, name)
         if CharDB.pending and CharDB.pending.loadout == loadout.name then CharDB.pending.loadout = name end
         loadout.name = name
         Changed()
@@ -989,6 +1112,7 @@ end
 
 local function CheckBars()
     if not CharDB or not AskBars() or CharDB.editing or InCombatLockdown() then return end
+    if NS.specQuietUntil and GetTime() < NS.specQuietUntil then return end
     local loadout = ActiveLoadout()
     if not loadout then return end
     local signature, count = BarDifferences(loadout)
@@ -1310,6 +1434,7 @@ local function BuildLoadoutMenu(_, root)
         l:CreateButton("Apply", function() ApplyLoadout(loadout) end)
         l:CreateButton("Edit", function() StartEdit(loadout) end)
         AddEquipmentSetMenu(l, loadout)
+        AddSpecRadios(l:CreateButton("Talent spec: " .. SpecText(SpecOf(loadout))), loadout)
         l:CreateButton("Overwrite with current bars", function()
             Confirm(("Overwrite loadout \"%s\" with the current bars?"):format(loadout.name), function()
                 SaveLoadout(loadout.name, loadout)
@@ -1464,10 +1589,42 @@ frame:RegisterEvent("PLAYER_REGEN_ENABLED")
 frame:RegisterEvent("SPELLS_CHANGED")
 frame:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
 frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+pcall(frame.RegisterEvent, frame, "ACTIVE_TALENT_GROUP_CHANGED")
 pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_SKILL_LINE")
 pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_TAB")
 
-local upgradeTimer, pendingTimer, barsTimer, gearTimer
+local upgradeTimer, pendingTimer, barsTimer, gearTimer, specTimer
+local pendingSpecApply
+-- The spec switched: apply the loadout bound to the new spec (after a moment, so the new spells and the client's own
+-- bar swap are in place). Without any spec binding nothing happens.
+local function OnSpecChanged()
+    if not CharDB then return end
+    local group = ActiveSpecGroup()
+    if group == CharDB.specGroup then return end
+    CharDB.specGroup = group
+    if not next(CharDB.specLoadouts) then return end
+    NS.specQuietUntil = GetTime() + 3
+    local name = CharDB.specLoadouts[group]
+    local loadout = name and FindLoadout(name)
+    if not loadout then
+        SetActive(nil) -- the bars belong to the other spec now
+        Changed()
+        return
+    end
+    if CharDB.editing then
+        Print(("spec %d: loadout \"%s\" not applied while you edit \"%s\"."):format(group, loadout.name, CharDB.editing.name))
+        return
+    end
+    if specTimer then specTimer:Cancel() end
+    specTimer = C_Timer.NewTimer(1.5, function()
+        specTimer = nil
+        if InCombatLockdown() then
+            pendingSpecApply = loadout
+            return
+        end
+        ApplyLoadout(loadout, "spec " .. group)
+    end)
+end
 local loggedIn = false
 -- Bars and gear are checked a moment after the last change, so dragging several things gives one prompt.
 local function ScheduleBarsCheck()
@@ -1510,8 +1667,10 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         CharDB = ActionSlotPickerCharDB
         CharDB.latest = CharDB.latest or {}
         for slot, v in pairs(CharDB.latest) do CharDB.latest[slot] = LatestOffset(v) end -- 0.2.x saved true
+        CharDB.specLoadouts = CharDB.specLoadouts or {}
     elseif event == "PLAYER_LOGIN" then
         loggedIn = true
+        CharDB.specGroup = ActiveSpecGroup()
         CreateMinimapButton()
         if HookButtons() then needHook = false end
         if EditingLoadout() then
@@ -1525,11 +1684,18 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         ScheduleBarsCheck()
     elseif event == "PLAYER_EQUIPMENT_CHANGED" then
         ScheduleGearCheck()
+    elseif event == "ACTIVE_TALENT_GROUP_CHANGED" then
+        OnSpecChanged()
     elseif event == "PLAYER_REGEN_ENABLED" then
         ScheduleBarsCheck()
         ScheduleGearCheck()
         if needHook and HookButtons() then needHook = false end
         if pendingUpgrade then UpgradeRanks(nil, "after combat") end
+        if pendingSpecApply then
+            local loadout = pendingSpecApply
+            pendingSpecApply = nil
+            ApplyLoadout(loadout, "spec switch after combat")
+        end
         FillPending("after combat")
     elseif event == "SPELLS_CHANGED" then
         if CharDB and CharDB.pending then
@@ -1738,3 +1904,7 @@ NS.OpenLoadoutMenu = OpenLoadoutMenu
 NS.ActiveLoadout = ActiveLoadout
 NS.CheckBars = CheckBars
 NS.CheckGear = CheckGear
+NS.PickupLoadoutMacro = PickupLoadoutMacro
+NS.SpecOf = SpecOf
+NS.SpecText = SpecText
+NS.AddSpecRadios = AddSpecRadios
