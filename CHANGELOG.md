@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1
+- Fix: while one of the addon's questions was on screen (save bars, save gear, name, confirm), Blizzard's guild
+  control window raised "action forbidden" errors that named Action Slot Picker. The questions are the addon's own
+  windows now and no longer use the game's popup system. They look and work the same: Escape still means "Not now".
+
 ## 1.1.0
 - The loadout macro uses the icon of the loadout's equipment set (Equipment Manager), in the window too. Existing
   loadout macros follow when a set is bound or its icon changes; unbinding the set brings back the book.

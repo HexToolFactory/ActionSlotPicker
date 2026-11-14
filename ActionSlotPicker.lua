@@ -825,50 +825,128 @@ local function DeleteLoadout(loadout)
     end
 end
 
-StaticPopupDialogs["ACTIONSLOTPICKER_NAME"] = {
-    text = "%s",
-    button1 = ACCEPT,
-    button2 = CANCEL,
-    hasEditBox = 1,
-    maxLetters = 40,
-    OnShow = function(dialog, data)
-        local box = dialog:GetEditBox()
-        box:SetText(data and data.default or "")
-        box:HighlightText()
-        box:SetFocus()
-    end,
-    OnAccept = function(dialog, data)
-        data.accept(strtrim(dialog:GetEditBox():GetText() or ""))
-    end,
-    EditBoxOnEnterPressed = function(editBox, data)
-        data.accept(strtrim(editBox:GetText() or ""))
-        editBox:GetParent():Hide()
-    end,
-    EditBoxOnEscapePressed = function(editBox)
-        editBox:GetParent():Hide()
-    end,
-    timeout = 0,
-    whileDead = 1,
-    hideOnEscape = 1,
-}
+------------------------------------------------------------------------
+-- Dialogs
+------------------------------------------------------------------------
+-- Own frames, not StaticPopup. A popup shown by an addon taints Blizzard's list of shown popups for as long as it
+-- is up. Blizzard code that walks that list (StaticPopup_Hide in the guild control window, for one) then fails on
+-- its protected calls, and the client names this addon as the cause.
+local dialogs, dialogOrder = {}, { "name", "confirm", "bars", "gear" }
 
-StaticPopupDialogs["ACTIONSLOTPICKER_CONFIRM"] = {
-    text = "%s",
-    button1 = YES,
-    button2 = NO,
-    OnAccept = function(dialog, data) data.accept() end,
-    timeout = 0,
-    whileDead = 1,
-    hideOnEscape = 1,
-    showAlert = 1,
-}
+local function StackDialogs()
+    local y = -160
+    for _, key in ipairs(dialogOrder) do
+        local d = dialogs[key]
+        if d and d:IsShown() then
+            d:ClearAllPoints()
+            d:SetPoint("TOP", UIParent, "TOP", 0, y)
+            y = y - d:GetHeight() - 6
+        end
+    end
+end
+
+-- A button or Enter. Escape ends in OnHide, a new question in ShowDialog.
+local function AnswerDialog(d, accepted)
+    local opts = d.opts
+    d.opts = nil -- answered: OnHide must not call cancel as well
+    local text = d.box:IsShown() and strtrim(d.box:GetText() or "") or nil
+    d:Hide()
+    if not opts then return end
+    if accepted then
+        opts.accept(text)
+    elseif opts.cancel then
+        opts.cancel()
+    end
+end
+
+local function CreateDialog(key)
+    local d = CreateFrame("Frame", "ActionSlotPickerDialog_" .. key, UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+    d:SetWidth(340)
+    d:SetFrameStrata("DIALOG")
+    d:SetToplevel(true)
+    d:EnableMouse(true)
+    d:Hide()
+    if d.SetBackdrop then
+        d:SetBackdrop({
+            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            tile = true, tileSize = 32, edgeSize = 32,
+            insets = { left = 11, right = 12, top = 12, bottom = 11 },
+        })
+    else
+        local background = d:CreateTexture(nil, "BACKGROUND")
+        background:SetAllPoints()
+        background:SetColorTexture(0, 0, 0, 0.9)
+    end
+
+    d.text = d:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+    d.text:SetPoint("TOP", 0, -24)
+    d.text:SetWidth(290)
+
+    d.box = CreateFrame("EditBox", nil, d, "InputBoxTemplate")
+    d.box:SetSize(200, 20)
+    d.box:SetPoint("TOP", d.text, "BOTTOM", 0, -10)
+    d.box:SetAutoFocus(false)
+    d.box:SetMaxLetters(40)
+    d.box:SetScript("OnEnterPressed", function() AnswerDialog(d, true) end)
+    d.box:SetScript("OnEscapePressed", function() d:Hide() end)
+
+    d.yes = CreateFrame("Button", nil, d, "UIPanelButtonTemplate")
+    d.yes:SetSize(120, 22)
+    d.yes:SetPoint("BOTTOMRIGHT", d, "BOTTOM", -6, 18)
+    d.yes:SetScript("OnClick", function() AnswerDialog(d, true) end)
+
+    d.no = CreateFrame("Button", nil, d, "UIPanelButtonTemplate")
+    d.no:SetSize(120, 22)
+    d.no:SetPoint("BOTTOMLEFT", d, "BOTTOM", 6, 18)
+    d.no:SetScript("OnClick", function() AnswerDialog(d, false) end)
+
+    d:SetScript("OnHide", function(self)
+        if self:IsShown() then return end -- only the UI was hidden (Alt+Z, cinematic): it comes back with it
+        local opts = self.opts
+        self.opts = nil
+        StackDialogs()
+        if opts and opts.cancel then opts.cancel() end -- closed with Escape: same as the second button
+    end)
+    tinsert(UISpecialFrames, d:GetName()) -- Escape closes it
+    return d
+end
+
+-- opts: text, yes, no (button texts), accept(text), cancel() or nil, edit = start text of the edit box or nil.
+-- Shown again while it is up: the new question replaces the old one and nothing is called.
+local function ShowDialog(key, opts)
+    local d = dialogs[key] or CreateDialog(key)
+    dialogs[key] = d
+    d.opts = opts
+    d.text:SetText(opts.text)
+    d.yes:SetText(opts.yes)
+    d.no:SetText(opts.no)
+    local edit = opts.edit ~= nil
+    d.box:SetShown(edit)
+    d:SetHeight((d.text:GetStringHeight() or 14) + (edit and 30 or 0) + 74)
+    d:Show()
+    StackDialogs()
+    if edit then
+        d.box:SetText(opts.edit)
+        d.box:HighlightText()
+        d.box:SetFocus()
+    end
+end
+
+-- Closes it without calling accept or cancel.
+local function HideDialog(key)
+    local d = dialogs[key]
+    if not d then return end
+    d.opts = nil
+    d:Hide()
+end
 
 local function AskName(prompt, default, accept)
-    StaticPopup_Show("ACTIONSLOTPICKER_NAME", prompt, nil, { default = default, accept = accept })
+    ShowDialog("name", { text = prompt, yes = ACCEPT, no = CANCEL, edit = default or "", accept = accept })
 end
 
 local function Confirm(prompt, accept)
-    StaticPopup_Show("ACTIONSLOTPICKER_CONFIRM", prompt, nil, { accept = accept })
+    ShowDialog("confirm", { text = prompt, yes = YES, no = NO, accept = accept })
 end
 
 local function NewLoadoutDialog()
@@ -1100,19 +1178,6 @@ end
 local function AskBars() return DB.askBars ~= false end
 local function AskGear() return DB.askGear ~= false end
 
-StaticPopupDialogs["ACTIONSLOTPICKER_SAVEBARS"] = {
-    text = "%s",
-    button1 = SAVE or "Save",
-    button2 = "Not now",
-    OnAccept = function(dialog, data) data.accept() end,
-    OnCancel = function(dialog, data) data.decline() end,
-    noCancelOnReuse = 1,
-    timeout = 0,
-    whileDead = 1,
-    hideOnEscape = 1,
-}
-StaticPopupDialogs["ACTIONSLOTPICKER_SAVEGEAR"] = CopyTable(StaticPopupDialogs["ACTIONSLOTPICKER_SAVEBARS"])
-
 -- Same action as saved? Spells by name; their rank only counts when the slot has no rank option.
 local function SameAction(slot, saved, now)
     if saved.t ~= now.t then return false end
@@ -1157,17 +1222,19 @@ local function CheckBars()
     local signature, count = BarDifferences(loadout)
     if count == 0 then
         CharDB.barsDeclined = nil
-        StaticPopup_Hide("ACTIONSLOTPICKER_SAVEBARS")
+        HideDialog("bars")
         return
     end
     if signature == CharDB.barsDeclined then return end
-    StaticPopup_Show("ACTIONSLOTPICKER_SAVEBARS",
-        ("Action bars changed (%d slot%s).\nSave them to loadout \"%s\"?"):format(count, count == 1 and "" or "s", loadout.name), nil, {
-            accept = function()
-                if ActiveLoadout() == loadout then SaveLoadout(loadout.name, loadout) end
-            end,
-            decline = function() CharDB.barsDeclined = signature end,
-        })
+    ShowDialog("bars", {
+        text = ("Action bars changed (%d slot%s).\nSave them to loadout \"%s\"?"):format(count, count == 1 and "" or "s", loadout.name),
+        yes = SAVE or "Save",
+        no = "Not now",
+        accept = function()
+            if ActiveLoadout() == loadout then SaveLoadout(loadout.name, loadout) end
+        end,
+        cancel = function() CharDB.barsDeclined = signature end,
+    })
 end
 
 local function GearSignature()
@@ -1185,23 +1252,25 @@ local function CheckGear()
     if set.equipped or EquippedSetName() then
         -- The bound set (or another complete set) is worn: nothing to save.
         if set.equipped then CharDB.gearDeclined = nil end
-        StaticPopup_Hide("ACTIONSLOTPICKER_SAVEGEAR")
+        HideDialog("gear")
         return
     end
     local signature = GearSignature()
     if signature == CharDB.gearDeclined then return end
-    StaticPopup_Show("ACTIONSLOTPICKER_SAVEGEAR",
-        ("Gear changed.\nSave it to equipment set \"%s\" (loadout \"%s\")?"):format(set.name, loadout.name), nil, {
-            accept = function()
-                local current = FindEquipmentSet(set.name)
-                if not current then return end
-                C_EquipmentSet.SaveEquipmentSet(current.setID)
-                Print(("equipment set \"%s\" saved."):format(set.name))
-                CharDB.gearDeclined = nil
-                Changed()
-            end,
-            decline = function() CharDB.gearDeclined = signature end,
-        })
+    ShowDialog("gear", {
+        text = ("Gear changed.\nSave it to equipment set \"%s\" (loadout \"%s\")?"):format(set.name, loadout.name),
+        yes = SAVE or "Save",
+        no = "Not now",
+        accept = function()
+            local current = FindEquipmentSet(set.name)
+            if not current then return end
+            C_EquipmentSet.SaveEquipmentSet(current.setID)
+            Print(("equipment set \"%s\" saved."):format(set.name))
+            CharDB.gearDeclined = nil
+            Changed()
+        end,
+        cancel = function() CharDB.gearDeclined = signature end,
+    })
 end
 
 ------------------------------------------------------------------------
