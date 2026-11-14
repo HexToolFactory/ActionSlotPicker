@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.0
+- First stable release. Same features as 0.3.0: slot picker with spell rank options (latest, -1, -2), loadout window,
+  loadout macro for your bars, loadouts per talent spec, equipment sets on loadouts and prompts to save bar and gear
+  changes.
+
 ## 0.3.0
 - New loadout window: click the minimap button or type `/asp`. List of the class's loadouts on the left; Apply,
   Edit on bars, Overwrite from bars, Rename, Copy, Delete and the equipment set on the right, plus every slot bar by
