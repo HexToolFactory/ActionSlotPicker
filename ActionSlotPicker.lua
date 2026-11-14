@@ -1054,8 +1054,11 @@ end
 -- Save prompts: bars or gear changed against the active loadout
 ------------------------------------------------------------------------
 
+-- Last applied or saved loadout; before any apply, the loadout bound to the current talent spec.
 local function ActiveLoadout()
-    return CharDB and CharDB.active and FindLoadout(CharDB.active) or nil
+    if not CharDB then return nil end
+    local name = CharDB.active or CharDB.specLoadouts[ActiveSpecGroup()]
+    return name and FindLoadout(name) or nil
 end
 
 local function AskBars() return DB.askBars ~= false end

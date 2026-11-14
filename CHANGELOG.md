@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.2
+- Fix: no prompt to save bar or gear changes until a loadout had been applied or saved. Now the loadout bound to
+  your current talent spec counts as the active one until you apply or save another.
+
 ## 1.0.1
 - Fix: in the loadout window the Spec button reached past the right edge of the window. The button rows start
   at the left edge again and the window is a little wider.
