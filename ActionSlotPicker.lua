@@ -438,12 +438,13 @@ local function MacroIndexByName(name)
 end
 
 -- Returns a pickup function for a saved slot entry (nil if it cannot be restored) and how it was resolved.
-local function PickupForEntry(entry, best, byID)
+-- latest: the target slot follows the latest rank, so a known lower rank is replaced by the best rank.
+local function PickupForEntry(entry, best, byID, latest)
     if entry.t == "spell" then
         local known = byID[entry.id]
         local top = entry.name and best[entry.name]
         local how = known and "same id" or "not in book"
-        if top and (not known or (entry.latest and top.rank > known.rank)) then
+        if top and (not known or (latest and top.rank > known.rank)) then
             known = top
             how = how .. ", by name -> best rank"
         end
@@ -506,9 +507,12 @@ local function ApplyLoadout(loadout, reason)
         local entry = loadout.slots[slot]
         local before = run and ActionText(slot)
         local actionType = Safe(GetActionInfo(slot))
-        SetLatest(slot, entry and entry.latest)
+        -- The latest-rank option belongs to the slot: a loadout can switch it on, never off.
+        local latest = IsLatest(slot) or (entry and entry.latest) or false
+        SetLatest(slot, latest)
         if entry then
-            local pickup, how = PickupForEntry(entry, best, byID)
+            local pickup, how = PickupForEntry(entry, best, byID, latest)
+            if latest then how = how .. " [latest rank slot]" end
             local ok, cursor, swapped = false, nil, nil
             if pickup then ok, cursor, swapped = PlaceInto(slot, pickup) end
             local result = ok and "PLACED" or (pickup and "NOCURSOR" or "UNRESOLVED")
@@ -573,7 +577,7 @@ local function FillPending(reason)
         else
             local known = byID[entry.id] or (entry.name and best[entry.name])
             if known then
-                local ok, cursor = PlaceInto(slot, PickupForEntry(entry, best, byID))
+                local ok, cursor = PlaceInto(slot, PickupForEntry(entry, best, byID, IsLatest(slot) or entry.latest))
                 ProbeLine("slot %d: %s known now -> cursor=%s now=%s ok=%s", slot, tostring(entry.name), tostring(cursor),
                     run and ActionText(slot) or "", tostring(ok))
                 if ok then
@@ -1169,7 +1173,7 @@ local function ProbeCheck(name)
         local entry = loadout.slots[slot]
         local now = ActionText(slot)
         if entry then
-            local pickup, how = PickupForEntry(entry, best, byID)
+            local pickup, how = PickupForEntry(entry, best, byID, IsLatest(slot) or entry.latest)
             local cursor = "not picked"
             if pickup then
                 ClearCursor()

@@ -2,6 +2,9 @@
 
 ## 0.2.2
 - Fix: Lua error at login ("attempt to call a nil value") while the loadout probe was switched on.
+- Fix: switching loadouts ignored the "Update spell rank to the latest available" option of a slot. The option now
+  belongs to the slot: a slot with it gets the highest known rank from every loadout, and applying a loadout no longer
+  switches it off (a loadout saved with the option still switches it on).
 
 ## 0.2.1
 - Loadouts: spells the character does not know when a loadout is applied (other talents, runes) no longer leave the
