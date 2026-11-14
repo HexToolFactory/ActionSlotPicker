@@ -890,10 +890,24 @@ end
 ------------------------------------------------------------------------
 
 local MACRO_NAME_MAX = 16
-local MACRO_ICONS = { "INV_Misc_Book_09", 134400 } -- book; question mark as fallback
+local DEFAULT_ICONS = { "INV_Misc_Book_09", 134400 } -- book; question mark as fallback
 
 local function LoadoutMacroBody(name)
     return "/asp load " .. name
+end
+
+-- Icon of the loadout macro: the icon of the bound equipment set (Equipment Manager), else nil (book).
+local function LoadoutIcon(loadout)
+    local set = loadout.equipmentSet and FindEquipmentSet(loadout.equipmentSet)
+    return set and set.icon or nil
+end
+
+local function IconChoices(loadout)
+    local icons = {}
+    local setIcon = LoadoutIcon(loadout)
+    if setIcon then icons[1] = setIcon end
+    for _, icon in ipairs(DEFAULT_ICONS) do icons[#icons + 1] = icon end
+    return icons
 end
 
 -- Index of this character's macro that applies the loadout, if there is one.
@@ -906,13 +920,30 @@ local function FindLoadoutMacro(name)
     end
 end
 
+-- Gives an existing loadout macro the icon of the loadout's equipment set. Without a set the icon is left alone,
+-- except right after the set was unbound (unbound = true), where it goes back to the book.
+local function SyncLoadoutMacroIcon(loadout, unbound)
+    if InCombatLockdown() then return end
+    local index = FindLoadoutMacro(loadout.name)
+    if not index then return end
+    local name, current, body = GetMacroInfo(index)
+    local setIcon = LoadoutIcon(loadout)
+    if setIcon and current == setIcon then return end
+    if not setIcon and not unbound then return end
+    for _, icon in ipairs(IconChoices(loadout)) do
+        if pcall(EditMacro, index, name, icon, body) then return end
+    end
+end
+
 -- Puts the loadout macro on the cursor, creating it first if needed. Out of combat only.
 local function PickupLoadoutMacro(loadout)
     if CombatBlocked() then return false end
     local index = FindLoadoutMacro(loadout.name)
-    if not index then
+    if index then
+        SyncLoadoutMacroIcon(loadout)
+    else
         local name, body = loadout.name:sub(1, MACRO_NAME_MAX), LoadoutMacroBody(loadout.name)
-        for _, icon in ipairs(MACRO_ICONS) do
+        for _, icon in ipairs(IconChoices(loadout)) do
             local ok, result = pcall(CreateMacro, name, icon, body, true)
             if ok and result then
                 index = result
@@ -930,10 +961,15 @@ local function PickupLoadoutMacro(loadout)
     return GetCursorInfo() ~= nil
 end
 
+local function SyncAllLoadoutMacroIcons()
+    for _, loadout in ipairs(Loadouts()) do SyncLoadoutMacroIcon(loadout) end
+end
+
 function RenameLoadoutMacro(old, new) -- declared local above RenameDialog's first use
     local index = FindLoadoutMacro(old)
     if index and not InCombatLockdown() then
-        pcall(EditMacro, index, new:sub(1, MACRO_NAME_MAX), nil, LoadoutMacroBody(new))
+        local _, icon = GetMacroInfo(index)
+        pcall(EditMacro, index, new:sub(1, MACRO_NAME_MAX), icon, LoadoutMacroBody(new))
     end
 end
 
@@ -1362,6 +1398,7 @@ end
 local function AddEquipmentSetRadios(desc, loadout)
     local function Bind(name)
         loadout.equipmentSet = name
+        SyncLoadoutMacroIcon(loadout, name == nil)
         Print(name and ("loadout \"%s\" equips \"%s\"."):format(loadout.name, name)
             or ("loadout \"%s\" equips no set."):format(loadout.name))
         Changed()
@@ -1592,6 +1629,7 @@ frame:RegisterEvent("PLAYER_REGEN_ENABLED")
 frame:RegisterEvent("SPELLS_CHANGED")
 frame:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
 frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
+frame:RegisterEvent("EQUIPMENT_SETS_CHANGED")
 pcall(frame.RegisterEvent, frame, "ACTIVE_TALENT_GROUP_CHANGED")
 pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_SKILL_LINE")
 pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_TAB")
@@ -1685,6 +1723,8 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         end
     elseif event == "ACTIONBAR_SLOT_CHANGED" then
         ScheduleBarsCheck()
+    elseif event == "EQUIPMENT_SETS_CHANGED" then
+        if loggedIn then SyncAllLoadoutMacroIcons() end -- a set icon changed in the Equipment Manager
     elseif event == "PLAYER_EQUIPMENT_CHANGED" then
         ScheduleGearCheck()
     elseif event == "ACTIVE_TALENT_GROUP_CHANGED" then
@@ -1908,6 +1948,7 @@ NS.ActiveLoadout = ActiveLoadout
 NS.CheckBars = CheckBars
 NS.CheckGear = CheckGear
 NS.PickupLoadoutMacro = PickupLoadoutMacro
+NS.LoadoutIcon = LoadoutIcon
 NS.SpecOf = SpecOf
 NS.SpecText = SpecText
 NS.AddSpecRadios = AddSpecRadios

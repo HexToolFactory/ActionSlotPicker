@@ -358,6 +358,7 @@ local function RefreshDetails(loadout)
     d.info:SetText(info)
     d.setButton:SetText("Equipment set: " .. (loadout.equipmentSet or "none"))
     d.specButton:SetText("Spec: " .. NS.SpecText(NS.SpecOf(loadout)))
+    d.macro.icon:SetTexture(NS.LoadoutIcon(loadout) or "Interface\Icons\INV_Misc_Book_09")
 
     local isEditing = editing == loadout
     d.edit:SetShown(not isEditing)

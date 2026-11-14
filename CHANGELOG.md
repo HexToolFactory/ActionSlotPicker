@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.0
+- The loadout macro uses the icon of the loadout's equipment set (Equipment Manager), in the window too. Existing
+  loadout macros follow when a set is bound or its icon changes; unbinding the set brings back the book.
+
 ## 1.0.2
 - Fix: no prompt to save bar or gear changes until a loadout had been applied or saved. Now the loadout bound to
   your current talent spec counts as the active one until you apply or save another.
