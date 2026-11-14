@@ -456,6 +456,7 @@ local function EquipBoundSet(name)
         ProbeLine("equipment set %s: already equipped", name)
         return
     end
+    NS.equipQuietUntil = GetTime() + 4 -- the swap fires many equipment events; CheckGear waits for it
     local ok = C_EquipmentSet.UseEquipmentSet(set.setID)
     ProbeLine("equipment set %s (id %s): UseEquipmentSet -> %s, items lost %s", name, tostring(set.setID), tostring(ok), tostring(set.lost))
     if ok then
@@ -592,6 +593,14 @@ local function SlotOffset(slot, entry)
     return offset
 end
 
+-- The loadout the bars belong to right now (last applied or saved). Bar and gear changes against it are offered
+-- for saving (CheckBars / CheckGear). The *Declined values hold what the player said "Not now" to.
+local function SetActive(loadout)
+    CharDB.active = loadout and loadout.name or nil
+    CharDB.barsDeclined = nil
+    CharDB.gearDeclined = nil
+end
+
 local function ApplyLoadout(loadout, reason)
     if CombatBlocked() then return end
     local run = ProbeBegin("apply", ("%s (%s)"):format(loadout.name, reason or "apply"))
@@ -641,6 +650,11 @@ local function ApplyLoadout(loadout, reason)
         end
     end
     CharDB.pending = next(pending.slots) and pending or nil
+    if reason ~= "edit start" and reason ~= "cancel edit" then
+        for _, l in ipairs(Loadouts()) do
+            if l == loadout then SetActive(loadout) end
+        end
+    end
     Print(("loadout \"%s\" applied: %d placed, %d cleared."):format(loadout.name, placed, cleared))
     EquipBoundSet(loadout.equipmentSet)
     if #waiting > 0 then
@@ -727,6 +741,7 @@ local function SaveLoadout(name, existing)
     loadout.saved = date("%Y-%m-%d %H:%M")
     Print(("loadout \"%s\" saved (%d slots)."):format(loadout.name, count))
     NS.lastSaved = loadout -- the loadout window selects it
+    SetActive(loadout)
     Changed()
     return loadout
 end
@@ -754,15 +769,17 @@ local function StartEdit(loadout)
     local run = ProbeBegin("edit-start backup", loadout.name)
     local backup = CaptureSlots()
     local backupSet = EquippedSetName()
+    local backupPending = CharDB.pending
     if CharDB.editing then
         ProbeLine("already editing %s: keeping its backup instead", tostring(CharDB.editing.name))
         backup = CharDB.editing.backup -- switching loadouts keeps the original bars and gear
         backupSet = CharDB.editing.backupSet
+        backupPending = CharDB.editing.backupPending
     end
     ProbeLine("equipment set before editing: %s", tostring(backupSet))
     if run then ProbeEnd() end
     ApplyLoadout(loadout, "edit start")
-    CharDB.editing = { name = loadout.name, backup = backup, backupSet = backupSet }
+    CharDB.editing = { name = loadout.name, backup = backup, backupSet = backupSet, backupPending = backupPending }
     Print(("editing \"%s\": change your action bars, then save or cancel in the loadout window."):format(loadout.name))
     Changed()
 end
@@ -779,6 +796,7 @@ local function CancelEdit()
     local editing = CharDB.editing
     if not editing or CombatBlocked() then return end
     ApplyLoadout({ name = "bars before editing", slots = editing.backup or {}, equipmentSet = editing.backupSet }, "cancel edit")
+    CharDB.pending = editing.backupPending -- spells that waited before the edit wait again
     StopEditing()
     Changed()
 end
@@ -794,6 +812,7 @@ local function DeleteLoadout(loadout)
             if EditingLoadout() == loadout then StopEditing() end
             table.remove(list, i)
             if CharDB.pending and CharDB.pending.loadout == loadout.name then CharDB.pending = nil end
+            if CharDB.active == loadout.name then SetActive(nil) end
             Print(("loadout \"%s\" deleted."):format(loadout.name))
             Changed()
             return
@@ -871,6 +890,7 @@ local function RenameDialog(loadout)
         end
         Print(("loadout \"%s\" renamed to \"%s\"."):format(loadout.name, name))
         if EditingLoadout() == loadout then CharDB.editing.name = name end
+        if CharDB.active == loadout.name then CharDB.active = name end
         if CharDB.pending and CharDB.pending.loadout == loadout.name then CharDB.pending.loadout = name end
         loadout.name = name
         Changed()
@@ -905,6 +925,120 @@ local function CountSlots(loadout)
     local n = 0
     for _ in pairs(loadout.slots or {}) do n = n + 1 end
     return n
+end
+
+------------------------------------------------------------------------
+-- Save prompts: bars or gear changed against the active loadout
+------------------------------------------------------------------------
+
+local function ActiveLoadout()
+    return CharDB and CharDB.active and FindLoadout(CharDB.active) or nil
+end
+
+local function AskBars() return DB.askBars ~= false end
+local function AskGear() return DB.askGear ~= false end
+
+StaticPopupDialogs["ACTIONSLOTPICKER_SAVEBARS"] = {
+    text = "%s",
+    button1 = SAVE or "Save",
+    button2 = "Not now",
+    OnAccept = function(dialog, data) data.accept() end,
+    OnCancel = function(dialog, data) data.decline() end,
+    noCancelOnReuse = 1,
+    timeout = 0,
+    whileDead = 1,
+    hideOnEscape = 1,
+}
+StaticPopupDialogs["ACTIONSLOTPICKER_SAVEGEAR"] = CopyTable(StaticPopupDialogs["ACTIONSLOTPICKER_SAVEBARS"])
+
+-- Same action as saved? Spells by name; their rank only counts when the slot has no rank option.
+local function SameAction(slot, saved, now)
+    if saved.t ~= now.t then return false end
+    if saved.t == "spell" then
+        if saved.id == now.id then return true end
+        if not saved.name or saved.name ~= now.name then return false end
+        return SlotOffset(slot, saved) ~= nil or (saved.rank or 0) == (now.rank or 0)
+    elseif saved.t == "macro" then
+        return saved.name == now.name
+    end
+    return saved.id == now.id
+end
+
+-- Slots where the bars differ from the loadout: signature text and count.
+local function BarDifferences(loadout)
+    local bars = CaptureSlots()
+    local pending = CharDB.pending
+    local waiting = pending and pending.loadout == loadout.name and pending.slots or {}
+    local diffs = {}
+    for slot = 1, MAX_SLOT do
+        local saved, now = loadout.slots and loadout.slots[slot], bars[slot]
+        local same
+        if saved and now then
+            same = SameAction(slot, saved, now)
+        elseif saved then
+            same = waiting[slot] ~= nil -- empty because the spell waits to be learned
+        else
+            same = now == nil
+        end
+        if not same then
+            diffs[#diffs + 1] = slot .. "=" .. (now and (now.t .. ":" .. tostring(now.name or now.id)) or "empty")
+        end
+    end
+    return table.concat(diffs, ";"), #diffs
+end
+
+local function CheckBars()
+    if not CharDB or not AskBars() or CharDB.editing or InCombatLockdown() then return end
+    local loadout = ActiveLoadout()
+    if not loadout then return end
+    local signature, count = BarDifferences(loadout)
+    if count == 0 then
+        CharDB.barsDeclined = nil
+        StaticPopup_Hide("ACTIONSLOTPICKER_SAVEBARS")
+        return
+    end
+    if signature == CharDB.barsDeclined then return end
+    StaticPopup_Show("ACTIONSLOTPICKER_SAVEBARS",
+        ("Action bars changed (%d slot%s).\nSave them to loadout \"%s\"?"):format(count, count == 1 and "" or "s", loadout.name), nil, {
+            accept = function()
+                if ActiveLoadout() == loadout then SaveLoadout(loadout.name, loadout) end
+            end,
+            decline = function() CharDB.barsDeclined = signature end,
+        })
+end
+
+local function GearSignature()
+    local ids = {}
+    for slot = 1, 19 do ids[slot] = tostring(Safe(GetInventoryItemID("player", slot)) or 0) end
+    return table.concat(ids, ",")
+end
+
+local function CheckGear()
+    if not CharDB or not AskGear() or CharDB.editing or InCombatLockdown() then return end
+    if NS.equipQuietUntil and GetTime() < NS.equipQuietUntil then return end
+    local loadout = ActiveLoadout()
+    local set = loadout and loadout.equipmentSet and FindEquipmentSet(loadout.equipmentSet)
+    if not set then return end
+    if set.equipped or EquippedSetName() then
+        -- The bound set (or another complete set) is worn: nothing to save.
+        if set.equipped then CharDB.gearDeclined = nil end
+        StaticPopup_Hide("ACTIONSLOTPICKER_SAVEGEAR")
+        return
+    end
+    local signature = GearSignature()
+    if signature == CharDB.gearDeclined then return end
+    StaticPopup_Show("ACTIONSLOTPICKER_SAVEGEAR",
+        ("Gear changed.\nSave it to equipment set \"%s\" (loadout \"%s\")?"):format(set.name, loadout.name), nil, {
+            accept = function()
+                local current = FindEquipmentSet(set.name)
+                if not current then return end
+                C_EquipmentSet.SaveEquipmentSet(current.setID)
+                Print(("equipment set \"%s\" saved."):format(set.name))
+                CharDB.gearDeclined = nil
+                Changed()
+            end,
+            decline = function() CharDB.gearDeclined = signature end,
+        })
 end
 
 ------------------------------------------------------------------------
@@ -1162,7 +1296,11 @@ local function BuildLoadoutMenu(_, root)
     if #list > 0 then root:CreateDivider() end
     for _, loadout in ipairs(list) do
         local label = loadout.name
-        if loadout == editing then label = "|cff40ff40" .. label .. " (editing)|r" end
+        if loadout == editing then
+            label = "|cff40ff40" .. label .. " (editing)|r"
+        elseif loadout == ActiveLoadout() then
+            label = label .. " |cff66bbff(active)|r"
+        end
         local l = root:CreateButton(label)
         l:SetTooltip(function(tooltip)
             GameTooltip_SetTitle(tooltip, loadout.name)
@@ -1324,10 +1462,32 @@ frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_LOGIN")
 frame:RegisterEvent("PLAYER_REGEN_ENABLED")
 frame:RegisterEvent("SPELLS_CHANGED")
+frame:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
+frame:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_SKILL_LINE")
 pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_TAB")
 
-local upgradeTimer, pendingTimer
+local upgradeTimer, pendingTimer, barsTimer, gearTimer
+local loggedIn = false
+-- Bars and gear are checked a moment after the last change, so dragging several things gives one prompt.
+local function ScheduleBarsCheck()
+    if not loggedIn then return end
+    if barsTimer then barsTimer:Cancel() end
+    barsTimer = C_Timer.NewTimer(2, function()
+        barsTimer = nil
+        CheckBars()
+    end)
+end
+local function ScheduleGearCheck()
+    if not loggedIn then return end
+    if gearTimer then gearTimer:Cancel() end
+    local wait = 2
+    if NS.equipQuietUntil then wait = math.max(wait, NS.equipQuietUntil - GetTime() + 0.5) end
+    gearTimer = C_Timer.NewTimer(wait, function()
+        gearTimer = nil
+        CheckGear()
+    end)
+end
 local function ScheduleUpgrade()
     if not CharDB or not next(CharDB.latest) then return end
     if upgradeTimer then upgradeTimer:Cancel() end
@@ -1351,6 +1511,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         CharDB.latest = CharDB.latest or {}
         for slot, v in pairs(CharDB.latest) do CharDB.latest[slot] = LatestOffset(v) end -- 0.2.x saved true
     elseif event == "PLAYER_LOGIN" then
+        loggedIn = true
         CreateMinimapButton()
         if HookButtons() then needHook = false end
         if EditingLoadout() then
@@ -1360,7 +1521,13 @@ frame:SetScript("OnEvent", function(_, event, arg1)
             ProbeSnapshot("login")
             Print("probe is ON (/asp probe off to stop recording).")
         end
+    elseif event == "ACTIONBAR_SLOT_CHANGED" then
+        ScheduleBarsCheck()
+    elseif event == "PLAYER_EQUIPMENT_CHANGED" then
+        ScheduleGearCheck()
     elseif event == "PLAYER_REGEN_ENABLED" then
+        ScheduleBarsCheck()
+        ScheduleGearCheck()
         if needHook and HookButtons() then needHook = false end
         if pendingUpgrade then UpgradeRanks(nil, "after combat") end
         FillPending("after combat")
@@ -1568,3 +1735,6 @@ NS.AddEquipmentSetRadios = AddEquipmentSetRadios
 NS.BuildSlotMenu = BuildSlotMenu
 NS.LoadoutTarget = LoadoutTarget
 NS.OpenLoadoutMenu = OpenLoadoutMenu
+NS.ActiveLoadout = ActiveLoadout
+NS.CheckBars = CheckBars
+NS.CheckGear = CheckGear

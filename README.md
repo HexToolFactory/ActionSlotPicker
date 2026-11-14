@@ -17,6 +17,10 @@ is shown bar by bar: click a slot to pick its spell, item or macro or its spell 
 are not available on this character, yellow ones wait to be learned. Loadouts are stored per class for the whole
 account; spells and macros are matched by name. Right-click the minimap button for a quick menu; drag it to move it.
 
+The loadout you applied or saved last is the **active** one. When you change your bars afterwards, a prompt asks
+whether to save them into it; when your gear changes and the active loadout has an equipment set, a prompt asks
+whether to save the gear into that set. Switch either prompt off in the loadout window.
+
 Each loadout can equip an equipment set from the character window's Equipment Manager (loadout -> "Equipment set").
 The set is bound by name, so every character of the class with a set of that name uses it.
 

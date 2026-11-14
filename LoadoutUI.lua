@@ -261,11 +261,16 @@ end
 local function RefreshList(selected)
     local list = SortedLoadouts()
     local editing = NS.EditingLoadout()
+    local active = NS.ActiveLoadout()
     for i, loadout in ipairs(list) do
         local b = ListButton(i)
         b.loadout = loadout
         local label = loadout.name
-        if loadout == editing then label = "|cff40ff40" .. label .. " (editing)|r" end
+        if loadout == editing then
+            label = "|cff40ff40" .. label .. " (editing)|r"
+        elseif loadout == active then
+            label = label .. " |cff66bbff(active)|r"
+        end
         b.text:SetText(label)
         b.selected:SetShown(loadout == selected)
         b:Show()
@@ -363,6 +368,8 @@ local function RefreshDetails(loadout)
         notes[#notes + 1] = "|cff40ff40On the bars for editing: change the bars, then Save edit or Cancel edit.|r"
     elseif editing then
         notes[#notes + 1] = ("|cff40ff40Editing \"%s\" on the bars.|r"):format(editing.name)
+    elseif NS.ActiveLoadout() == loadout then
+        notes[#notes + 1] = "|cff66bbffActive: changes to your bars or gear ask to be saved here.|r"
     end
     local pending = NS.CharDB().pending
     if pending and pending.loadout == loadout.name then
@@ -449,7 +456,7 @@ local function CreateWindow()
     -- Left: loadout list
     local listScroll = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
     listScroll:SetPoint("TOPLEFT", 12, -32)
-    listScroll:SetSize(LIST_WIDTH, HEIGHT - 80)
+    listScroll:SetSize(LIST_WIDTH, HEIGHT - 132)
     listChild = CreateFrame("Frame", nil, listScroll)
     listChild:SetSize(LIST_WIDTH, 1)
     listScroll:SetScrollChild(listChild)
@@ -462,6 +469,37 @@ local function CreateWindow()
     local new = Button(frame, "New from bars", LIST_WIDTH, function() NS.NewLoadoutDialog() end,
         "Saves all your action bars as a new loadout.")
     new:SetPoint("BOTTOMLEFT", 12, 12)
+
+    -- Ask to save changes of the active loadout (account-wide settings)
+    local function AskBox(key, text, tip, anchor)
+        local box = CreateFrame("CheckButton", nil, frame, "UICheckButtonTemplate")
+        box:SetSize(24, 24)
+        box:SetPoint("BOTTOMLEFT", anchor, "TOPLEFT", -2, 2)
+        box.label = box:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        box.label:SetPoint("LEFT", box, "RIGHT", 2, 0)
+        box.label:SetText(text)
+        box:SetChecked(NS.DB()[key] ~= false)
+        box:SetScript("OnClick", function(self)
+            if self:GetChecked() then
+                NS.DB()[key] = nil
+                if key == "askBars" then NS.CheckBars() else NS.CheckGear() end
+            else
+                NS.DB()[key] = false
+            end
+        end)
+        box:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip_SetTitle(GameTooltip, text)
+            GameTooltip_AddNormalLine(GameTooltip, tip, true)
+            GameTooltip:Show()
+        end)
+        box:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        return box
+    end
+    frame.askGear = AskBox("askGear", "Ask to save gear changes",
+        "Gear changed while the active loadout has an equipment set: ask to save it into that set.", new)
+    frame.askBars = AskBox("askBars", "Ask to save bar changes",
+        "Action bars changed after applying or saving a loadout: ask to save them into it.", frame.askGear)
 
     -- Right: selected loadout
     local left = 12 + LIST_WIDTH + 30

@@ -10,6 +10,12 @@
   replaces the checkbox). Latest -1 / -2 follow one or two ranks below the highest known rank, also after learning
   a new one. Loadouts save this option per slot. Old "latest" settings carry over.
 - Loadouts can be copied.
+- Save prompts: the loadout you applied or saved last is the active one (marked in the window and the quick menu).
+  When you change your action bars afterwards, a prompt asks whether to save them into it; when your gear changes
+  and the active loadout has an equipment set, a prompt asks whether to save the gear into that set. "Not now" is
+  remembered until you change something else. Both can be switched off in the loadout window. No prompts while
+  editing a loadout or in combat.
+- Cancelling an edit brings back the spells that were waiting to be learned before the edit.
 - Loadouts can equip an equipment set (loadout window or quick menu -> loadout -> "Equipment set"). Applying the loadout equips it;
   cancelling an edit puts the set back that was worn before. Sets are bound by name, so every character of the class
   with a set of that name can use it.
