@@ -10,7 +10,8 @@
 
 local ADDON, NS = ...
 local DB      -- account: loadouts per class
-local CharDB  -- character: latest[slot] = rank offset (0 = latest, 1 = latest -1, 2 = latest -2) per slot
+local CharDB  -- character: latest[slot] = rank offset (0 = latest, 1 = latest -1, 2 = latest -2) of the bars right now;
+              -- a loadout keeps its own copy in entry.latest and puts it back when it is applied
 
 -- Rank option of a slot: nil = keep the rank, 0 = latest known rank, 1 = one below the latest, 2 = two below.
 -- Saved data before 0.3.0 used true for "latest".
@@ -586,11 +587,31 @@ local function PendingNames()
     return names
 end
 
--- Rank option for a slot that gets a loadout entry: the slot's own option, else the one saved with the entry.
+-- Rank option for a slot that holds a loadout entry: the slot's own option, else the one saved with the entry.
 local function SlotOffset(slot, entry)
     local offset = IsLatest(slot)
     if offset == nil and entry then offset = LatestOffset(entry.latest) end
     return offset
+end
+
+-- Rank option a loadout entry brings along (spells only).
+local function EntryOffset(entry)
+    if entry and entry.t == "spell" then return LatestOffset(entry.latest) end
+    return nil
+end
+
+-- Before 1.2.0 all loadouts shared one rank option per slot and the slot's option won over the saved one.
+-- Once per character: every loadout of this class takes over the options the bars have now, so nothing changes
+-- until the player sets an option, which then stays with that loadout.
+local function MigrateRankOptions()
+    if CharDB.rankPerLoadout then return end
+    CharDB.rankPerLoadout = true
+    for _, loadout in ipairs(Loadouts()) do
+        for slot, entry in pairs(loadout.slots or {}) do
+            local offset = IsLatest(slot)
+            if offset ~= nil and entry.t == "spell" then entry.latest = offset end
+        end
+    end
 end
 
 -- The loadout the bars belong to right now (last applied or saved). Bar and gear changes against it are offered
@@ -614,8 +635,8 @@ local function ApplyLoadout(loadout, reason)
         local entry = loadout.slots[slot]
         local before = run and ActionText(slot)
         local actionType = Safe(GetActionInfo(slot))
-        -- The rank option belongs to the slot: a loadout can switch it on, never off or to another offset.
-        local offset = SlotOffset(slot, entry)
+        -- The rank options belong to the loadout: every slot gets the option saved with its entry, or none.
+        local offset = EntryOffset(entry)
         SetLatest(slot, offset)
         if entry then
             local pickup, how = PickupForEntry(entry, best, byID, offset)
@@ -1175,6 +1196,27 @@ local function ActiveLoadout()
     return name and FindLoadout(name) or nil
 end
 
+-- A rank option set on the bars goes straight into the active loadout, so it comes back with that loadout and
+-- its talent spec. Only while the slot still holds the loadout's spell; other bar changes are offered for saving
+-- by CheckBars, and a save takes the options along.
+local function RememberRank(slot)
+    if CharDB.editing then return end -- saved or thrown away with the edit
+    local loadout = ActiveLoadout()
+    local entry = loadout and loadout.slots and loadout.slots[slot]
+    if not entry or entry.t ~= "spell" then return end
+    local actionType, id = GetActionInfo(slot)
+    actionType, id = Safe(actionType), Safe(id)
+    if actionType ~= "spell" or not id then return end
+    local _, _, byID = ReadSpellbook()
+    local known = byID[id]
+    local name = (known and known.name) or C_Spell.GetSpellName(id)
+    if id ~= entry.id and (not name or name ~= entry.name) then return end
+    entry.latest = IsLatest(slot)
+    entry.id, entry.rank = id, known and known.rank or entry.rank
+    loadout.saved = date("%Y-%m-%d %H:%M")
+    Changed()
+end
+
 local function AskBars() return DB.askBars ~= false end
 local function AskGear() return DB.askGear ~= false end
 
@@ -1414,6 +1456,7 @@ local function BarTarget(slot)
         setRank = function(offset)
             SetLatest(slot, offset)
             if offset ~= nil then UpgradeRanks(slot) end
+            RememberRank(slot)
         end,
         clear = function()
             ClearSlot(slot)
@@ -1781,6 +1824,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
     elseif event == "PLAYER_LOGIN" then
         loggedIn = true
         CharDB.specGroup = ActiveSpecGroup()
+        MigrateRankOptions()
         CreateMinimapButton()
         if HookButtons() then needHook = false end
         if EditingLoadout() then
@@ -2014,6 +2058,7 @@ NS.BuildSlotMenu = BuildSlotMenu
 NS.LoadoutTarget = LoadoutTarget
 NS.OpenLoadoutMenu = OpenLoadoutMenu
 NS.ActiveLoadout = ActiveLoadout
+NS.MigrateRankOptions = MigrateRankOptions
 NS.CheckBars = CheckBars
 NS.CheckGear = CheckGear
 NS.PickupLoadoutMacro = PickupLoadoutMacro

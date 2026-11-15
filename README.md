@@ -8,7 +8,8 @@ WoW: Forever addon for filling action bars without dragging things out of the sp
 - **Bag**: item type (Consumable, Trade Goods ...) → item
 - **Macros**: account-wide or character-specific
 - **Spell rank**: per slot. Keep this rank, Latest (highest rank you know), Latest -1 or Latest -2 (one or two ranks
-  below it, e.g. a cheaper rank). The slot follows its choice when you learn a new rank
+  below it, e.g. a cheaper rank). The slot follows its choice when you learn a new rank. Each loadout keeps its own
+  rank options, so they switch with the loadout and the talent spec
 - **Clear this slot**
 
 **Loadout window** (click the minimap button or `/asp`): loadouts of all action bars together. Create from your bars,

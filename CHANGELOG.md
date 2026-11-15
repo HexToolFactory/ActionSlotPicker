@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0
+- The spell rank option of a slot (Keep, Latest, Latest -1, Latest -2) now belongs to the loadout. Each loadout
+  keeps its own options, and applying a loadout or switching the talent spec brings them back. Before, all loadouts
+  shared one option per slot, so a setting made in one spec carried over into the other.
+- Setting the option in the slot menu stores it in the active loadout right away, without a save prompt.
+- Existing settings carry over: at the first login every loadout takes the options your bars have now.
+
 ## 1.1.1
 - Fix: while one of the addon's questions was on screen (save bars, save gear, name, confirm), Blizzard's guild
   control window raised "action forbidden" errors that named Action Slot Picker. The questions are the addon's own
