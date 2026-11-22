@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.0
+- Equipment sets and the bank: "Store set in bank" moves the set's pieces from your bags into the bank, "Pick up set
+  from bank" brings them back. Worn pieces stay on. In the minimap button's right-click menu and in a new "Gear sets"
+  button at the bank window; needs the bank open. Also `/asp store <set>` and `/asp pickup <set>`.
+- Naked mode: armor and weapons go into your bags (no durability loss), the same pieces go back on when you switch
+  it off. In the same two menus, or `/asp naked`.
+- Gear sets window (`/asp sets`, the "Gear sets" button at the bank, or the minimap menu): every equipment set with
+  its pieces and where each one is - worn, bags, bank or missing - plus Store and Pick up buttons. The addon
+  remembers what the bank held when it was last open, so you see which set is in the bank from anywhere.
+- Item comparison (Shift): next to the equipped item, a third tooltip "Other spec: <set>" shows the piece your
+  other talent spec wears in that slot. It uses the equipment set of the loadout bound to the other spec.
+- Fix: no more "save bars / save gear?" prompt after switching the loadout or the talent spec. What differs right
+  after a switch (used-up items, a spell that turned into another one, missing set pieces) is no longer asked;
+  your own changes afterwards still are.
+
 ## 1.2.0
 - The spell rank option of a slot (Keep, Latest, Latest -1, Latest -2) now belongs to the loadout. Each loadout
   keeps its own options, and applying a loadout or switching the talent spec brings them back. Before, all loadouts

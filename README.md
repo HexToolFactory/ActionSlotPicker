@@ -18,6 +18,18 @@ is shown bar by bar: click a slot to pick its spell, item or macro or its spell 
 are not available on this character, yellow ones wait to be learned. Loadouts are stored per class for the whole
 account; spells and macros are matched by name. Right-click the minimap button for a quick menu; drag it to move it.
 
+**Gear** (right-click the minimap button, or the "Gear sets" button at the bank window):
+
+- **Store set in bank / Pick up set from bank**: moves the pieces of an equipment set between your bags and the bank
+  while the bank is open. Worn pieces stay on. `/asp store <set>`, `/asp pickup <set>`
+- **Naked mode**: armor and weapons go into your bags, so dying costs no durability; switch it off and the same pieces
+  go back on. `/asp naked`
+- **Gear sets window** (`/asp sets`): every equipment set with its pieces and where each one is: worn, bags, bank or
+  missing. The bank's gear is remembered from the last visit, so the window also works away from the bank
+- **Other spec in the item comparison**: hold Shift on an item and, next to the equipped piece, a tooltip
+  "Other spec: <set>" shows what your other talent spec wears in that slot (the equipment set of the loadout bound
+  to that spec)
+
 **Loadout macro**: drag the book icon next to the loadout's name onto an action bar. Clicking that button applies the
 loadout (`/asp load <name>`, created as a character macro the first time).
 

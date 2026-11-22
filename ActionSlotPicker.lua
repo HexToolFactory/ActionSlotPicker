@@ -461,6 +461,7 @@ local function EquipBoundSet(name)
     local ok = C_EquipmentSet.UseEquipmentSet(set.setID)
     ProbeLine("equipment set %s (id %s): UseEquipmentSet -> %s, items lost %s", name, tostring(set.setID), tostring(ok), tostring(set.lost))
     if ok then
+        CharDB.naked = nil -- dressed by the set: naked mode (Gear.lua) is over
         Print(("equipped \"%s\"."):format(name))
     else
         Print(("could not equip \"%s\"."):format(name))
@@ -622,6 +623,15 @@ local function SetActive(loadout)
     CharDB.active = loadout and loadout.name or nil
     CharDB.barsDeclined = nil
     CharDB.gearDeclined = nil
+    CharDB.barsBaseline = nil
+end
+
+-- After a loadout was applied (also by a spec switch) bars and gear settle for a moment. What differs from the
+-- loadout then is not the player's change (items used up, a spell that turns into another one, set pieces that
+-- are not in the bags). It becomes the baseline and is never offered for saving; only later changes are.
+local SWITCH_QUIET = 6
+local function InSwitch()
+    return NS.switchQuietUntil ~= nil and GetTime() < NS.switchQuietUntil
 end
 
 local function ApplyLoadout(loadout, reason)
@@ -680,6 +690,11 @@ local function ApplyLoadout(loadout, reason)
     end
     Print(("loadout \"%s\" applied: %d placed, %d cleared."):format(loadout.name, placed, cleared))
     EquipBoundSet(loadout.equipmentSet)
+    NS.switchQuietUntil = GetTime() + SWITCH_QUIET
+    C_Timer.After(SWITCH_QUIET - 0.5, function() -- last look inside the quiet time: the baseline
+        if NS.CheckBars then NS.CheckBars() end
+        if NS.CheckGear then NS.CheckGear() end
+    end)
     if #waiting > 0 then
         table.sort(waiting)
         Print(("not known yet, placed as soon as you learn them (e.g. after switching talents): %s"):format(table.concat(waiting, ", ")))
@@ -1233,12 +1248,14 @@ local function SameAction(slot, saved, now)
     return saved.id == now.id
 end
 
--- Slots where the bars differ from the loadout: signature text and count.
+-- Slots where the bars differ from the loadout: signature text and count, without the slots that already
+-- differed the same way when the loadout was applied (CharDB.barsBaseline). Third value: every differing slot.
 local function BarDifferences(loadout)
     local bars = CaptureSlots()
     local pending = CharDB.pending
     local waiting = pending and pending.loadout == loadout.name and pending.slots or {}
-    local diffs = {}
+    local baseline = CharDB.barsBaseline or {}
+    local diffs, all = {}, {}
     for slot = 1, MAX_SLOT do
         local saved, now = loadout.slots and loadout.slots[slot], bars[slot]
         local same
@@ -1250,10 +1267,12 @@ local function BarDifferences(loadout)
             same = now == nil
         end
         if not same then
-            diffs[#diffs + 1] = slot .. "=" .. (now and (now.t .. ":" .. tostring(now.name or now.id)) or "empty")
+            local text = now and (now.t .. ":" .. tostring(now.name or now.id)) or "empty"
+            all[slot] = text
+            if baseline[slot] ~= text then diffs[#diffs + 1] = slot .. "=" .. text end
         end
     end
-    return table.concat(diffs, ";"), #diffs
+    return table.concat(diffs, ";"), #diffs, all
 end
 
 local function CheckBars()
@@ -1261,7 +1280,13 @@ local function CheckBars()
     if NS.specQuietUntil and GetTime() < NS.specQuietUntil then return end
     local loadout = ActiveLoadout()
     if not loadout then return end
-    local signature, count = BarDifferences(loadout)
+    local signature, count, all = BarDifferences(loadout)
+    if InSwitch() then
+        CharDB.barsBaseline = next(all) and all or nil
+        CharDB.barsDeclined = nil
+        HideDialog("bars")
+        return
+    end
     if count == 0 then
         CharDB.barsDeclined = nil
         HideDialog("bars")
@@ -1287,6 +1312,7 @@ end
 
 local function CheckGear()
     if not CharDB or not AskGear() or CharDB.editing or InCombatLockdown() then return end
+    if CharDB.naked then return end -- naked mode (Gear.lua): the gear comes back on, nothing to save
     if NS.equipQuietUntil and GetTime() < NS.equipQuietUntil then return end
     local loadout = ActiveLoadout()
     local set = loadout and loadout.equipmentSet and FindEquipmentSet(loadout.equipmentSet)
@@ -1298,6 +1324,11 @@ local function CheckGear()
         return
     end
     local signature = GearSignature()
+    if InSwitch() then
+        CharDB.gearDeclined = signature
+        HideDialog("gear")
+        return
+    end
     if signature == CharDB.gearDeclined then return end
     ShowDialog("gear", {
         text = ("Gear changed.\nSave it to equipment set \"%s\" (loadout \"%s\")?"):format(set.name, loadout.name),
@@ -1598,6 +1629,10 @@ local function BuildLoadoutMenu(_, root)
             Confirm(("Delete loadout \"%s\"?"):format(loadout.name), function() DeleteLoadout(loadout) end)
         end)
     end
+    if NS.AddGearMenu then -- Gear.lua: equipment sets to and from the bank, naked mode
+        root:CreateDivider()
+        NS.AddGearMenu(root)
+    end
 end
 
 local function SlotOf(button)
@@ -1716,7 +1751,7 @@ local function CreateMinimapButton()
             GameTooltip_AddNormalLine(GameTooltip, ("|cff40ff40Editing loadout \"%s\"|r"):format(editing.name))
         end
         GameTooltip_AddNormalLine(GameTooltip, "Click: loadout window (all bars)")
-        GameTooltip_AddNormalLine(GameTooltip, "Right-click: quick loadout menu")
+        GameTooltip_AddNormalLine(GameTooltip, "Right-click: loadouts, sets to bank, naked mode")
         GameTooltip_AddNormalLine(GameTooltip, "Drag: move this button")
         GameTooltip_AddNormalLine(GameTooltip, "Shift + right-click an action button: pick its spell, item or macro", true)
         GameTooltip:Show()
@@ -2003,6 +2038,8 @@ SlashCmdList.ACTIONSLOTPICKER = function(msg)
         if loadout then ApplyLoadout(loadout) else Print(("no loadout \"%s\"."):format(rest)) end
     elseif cmd == "probe" then
         ProbeCommand(rest)
+    elseif NS.GearCommand and NS.GearCommand(cmd, rest) then
+        -- sets, naked, store <set>, pickup <set> (Gear.lua)
     elseif cmd == "list" then
         local list = Loadouts()
         if #list == 0 then Print("no loadouts for this class yet.") end
@@ -2016,6 +2053,9 @@ SlashCmdList.ACTIONSLOTPICKER = function(msg)
         Print("/asp probe - diagnostics for loadouts (records every step, see /asp probe)")
         Print("/asp rank - list the slots with a rank option (latest, -1, -2; set it in the slot's menu)")
         Print("/asp save <name> | /asp load <name> | /asp list - action bar loadouts")
+        Print("/asp naked - armor and weapons into the bags, again to dress")
+        Print("/asp sets - gear sets window: where every set piece is (worn, bags, bank)")
+        Print("/asp store <set> | /asp pickup <set> - equipment set to / from the bank (bank open)")
     end
 end
 
@@ -2053,6 +2093,8 @@ NS.PendingCount = PendingCount
 NS.PendingNames = PendingNames
 NS.StopWaiting = StopWaiting
 NS.EquipmentSets = EquipmentSets
+NS.FindEquipmentSet = FindEquipmentSet
+NS.ActiveSpecGroup = ActiveSpecGroup
 NS.AddEquipmentSetRadios = AddEquipmentSetRadios
 NS.BuildSlotMenu = BuildSlotMenu
 NS.LoadoutTarget = LoadoutTarget
