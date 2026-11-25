@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: Loadout Manager |cff999999(old Action Slot Picker data)|r
+## Version: @project-version@
+## Author: HexToolFactory
+## Notes: Holds the saved data of Action Slot Picker, the old name of Loadout Manager. Loadout Manager copies it once per character. Delete this folder when all your characters have logged in once.
+## LoadOnDemand: 1
+## X-Loadout-Manager-Data: 1
+## SavedVariables: ActionSlotPickerDB
+## SavedVariablesPerCharacter: ActionSlotPickerCharDB
+
+Data.lua

@@ -1,28 +1,46 @@
--- Action Slot Picker
+-- Loadout Manager
 -- Shift + right-click an action button: dropdown with
 --   1. Spells/Abilities  -> spellbook tab (General, specs ...) -> spell -> rank (tooltip on hover)
 --   2. Bag               -> item type (Consumable, Trade Goods ...) -> item
 --   3. Macros            -> Account-wide / Character-specific
---   "Spell rank" option of the clicked slot only: keep / latest / latest -1 / latest -2, "Clear this slot"
+--   "Spell rank" option of the clicked slot only: latest (the default) / latest -1 / latest -2 / keep, "Clear this slot"
 -- Minimap button: click opens the loadout manager (LoadoutUI.lua), right-click a quick loadout menu.
 -- Loadouts cover all action bars together. Drag the button to move it around the minimap.
 -- Placing actions is blocked in combat; everything here only runs out of combat.
 
 local ADDON, NS = ...
 local DB      -- account: loadouts per class
-local CharDB  -- character: latest[slot] = rank offset (0 = latest, 1 = latest -1, 2 = latest -2) of the bars right now;
+local CharDB  -- character: latest[slot] = rank option of the bars right now (see below);
               -- a loadout keeps its own copy in entry.latest and puts it back when it is applied
 
--- Rank option of a slot: nil = keep the rank, 0 = latest known rank, 1 = one below the latest, 2 = two below.
--- Saved data before 0.3.0 used true for "latest".
+-- Rank option of a slot or of a loadout entry.
+--   stored: nil = the default (latest rank), "keep" = the rank stays as placed, 0 = latest, 1 / 2 = one / two below
+--   offset: what the code works with: nil = keep, 0 = latest, 1, 2
+-- Saved data before 0.3.0 used true for "latest". Before 1.4.0 a missing value meant "keep": MigrateRankDefault
+-- turns the lower ranks of that time into "keep" once, and only after that does a missing value count as latest
+-- (slotDefault / entryDefault).
 local MAX_RANK_OFFSET = 2
-local function LatestOffset(v)
+local DEFAULT_RANK = 0
+local slotDefault, entryDefault -- DEFAULT_RANK once the old data is converted, nil (= keep) before
+local function LatestOffset(v) -- an explicit stored value as offset; nil for "keep" and for no value
     if v == true then return 0 end
     if type(v) == "number" then return math.max(0, math.min(MAX_RANK_OFFSET, math.floor(v))) end
     return nil
 end
-local function IsLatest(slot) return LatestOffset(CharDB.latest[slot]) end
-local function SetLatest(slot, v) CharDB.latest[slot] = LatestOffset(v) end
+local function RankStored(v) -- a stored value, cleaned: "keep", 0 / 1 / 2 or nil
+    if v == "keep" then return "keep" end
+    return LatestOffset(v)
+end
+local function StoredFor(offset) -- an offset the player chose, as stored value
+    if offset == nil then return "keep" end
+    return LatestOffset(offset)
+end
+local function IsLatest(slot)
+    local v = CharDB.latest[slot]
+    if v == nil then return slotDefault end
+    return LatestOffset(v)
+end
+local function SetLatest(slot, offset) CharDB.latest[slot] = StoredFor(offset) end
 
 local function RankOptionText(offset)
     if offset == nil then return "keep this rank" end
@@ -43,7 +61,7 @@ local ITEM_FLYOUT = Enum.SpellBookItemType.Flyout
 local SCROLL_HEIGHT = 520
 
 local function Print(msg)
-    print("|cff66bbffAction Slot Picker:|r " .. msg)
+    print("|cff66bbffLoadout Manager:|r " .. msg)
 end
 
 -- Values can be secret on this client (mostly in combat). Treat a secret as "unknown".
@@ -80,7 +98,7 @@ local function CombatBlocked()
 end
 
 ------------------------------------------------------------------------
--- Probe (/asp probe on): records every loadout step per slot into ActionSlotPickerDB.probe.runs,
+-- Probe (/lm probe on): records every loadout step per slot into LoadoutManagerDB.probe.runs,
 -- written to disk at /reload or logout. Off by default; costs nothing while off.
 ------------------------------------------------------------------------
 
@@ -320,12 +338,23 @@ end
 
 -- pickup() puts something on the cursor; it goes into the slot and whatever was there is dropped.
 -- Returns ok, plus (only while a probe run is open) the cursor after pickup and after PlaceAction.
+-- What the addon saw in a slot last: slot -> spell id (false = no spell). NoteSlots compares against it to
+-- tell a spell the player dragged in from one the addon placed itself.
+local seenSpell = {}
+
+local function SpellInSlot(slot)
+    local actionType, id = GetActionInfo(slot)
+    actionType, id = Safe(actionType), Safe(id)
+    return actionType == "spell" and id or false
+end
+
 local function PlaceInto(slot, pickup)
     ClearCursor()
     pickup()
     local cursor = probeRun and CursorText() or nil
     if not GetCursorInfo() then return false, cursor end
     PlaceAction(slot)
+    seenSpell[slot] = SpellInSlot(slot)
     local swapped = probeRun and CursorText() or nil
     ClearCursor()
     return true, cursor, swapped
@@ -335,6 +364,7 @@ local function ClearSlot(slot)
     ClearCursor()
     PickupAction(slot)
     ClearCursor()
+    seenSpell[slot] = false
 end
 
 local function PickupRank(entry)
@@ -361,6 +391,44 @@ end
 
 local pendingUpgrade = false
 
+-- A lower rank the player puts into a slot by hand is meant to stay: when the spell of a slot with the default
+-- option changes to a rank below the highest known one, the slot is set to "keep". The addon's own placements
+-- never look like that (they place the highest rank, or the slot has an explicit option).
+local noted, noteTimer = {}, nil
+
+local function NoteSlots()
+    if noteTimer then noteTimer:Cancel() end
+    noteTimer = nil
+    local slots = noted
+    noted = {}
+    if not CharDB or slotDefault == nil then return end
+    local best, byID
+    for slot in pairs(slots) do
+        local now, before = SpellInSlot(slot), seenSpell[slot]
+        seenSpell[slot] = now
+        if now and before ~= nil and before ~= now and CharDB.latest[slot] == nil then
+            if not best then
+                local _
+                _, best, byID = ReadSpellbook()
+            end
+            local known = byID[now]
+            local top = known and best[known.name]
+            if top and known.rank < top.rank then CharDB.latest[slot] = "keep" end
+        end
+    end
+end
+
+local function NoteSlot(slot)
+    slot = Safe(slot)
+    if type(slot) ~= "number" or slot < 1 or slot > MAX_SLOT then return end
+    noted[slot] = true
+    if not noteTimer then noteTimer = C_Timer.NewTimer(0.1, NoteSlots) end
+end
+
+local function SeeAllSlots()
+    for slot = 1, MAX_SLOT do seenSpell[slot] = SpellInSlot(slot) end
+end
+
 -- Puts the rank the slot's option asks for (latest, latest -1, latest -2) into the slot. Only rank numbers count:
 -- two ids with the same rank (e.g. an override id shown on the bar) are left alone.
 local function UpgradeSlot(slot, best, byID)
@@ -378,24 +446,24 @@ local function UpgradeSlot(slot, best, byID)
     end
 end
 
--- onlySlot: upgrade just that slot (checkbox switched on); otherwise every slot switched on.
+-- onlySlot: just that slot (its option was set); otherwise every slot whose option follows a rank.
 local function UpgradeRanks(onlySlot, reason)
-    if not next(CharDB.latest) then return end
     if InCombatLockdown() then
         pendingUpgrade = true
         return
     end
     pendingUpgrade = false
+    NoteSlots() -- a lower rank dragged in a moment ago is kept, not replaced
     local ownRun = not probeRun and ProbeBegin("upgrade", reason or (onlySlot and ("checkbox slot " .. onlySlot)) or "?")
     local _, best, byID = ReadSpellbook()
     if probeRun then
         local flagged = {}
         for slot, offset in pairs(CharDB.latest) do flagged[#flagged + 1] = slot .. "=" .. tostring(offset) end
         table.sort(flagged)
-        ProbeLine("rank option slots (slot=offset): %s", table.concat(flagged, ","))
+        ProbeLine("rank option slots (slot=stored, default %s): %s", tostring(slotDefault), table.concat(flagged, ","))
     end
-    for slot in pairs(CharDB.latest) do
-        if not onlySlot or slot == onlySlot then
+    for slot = 1, MAX_SLOT do
+        if (not onlySlot or slot == onlySlot) and IsLatest(slot) ~= nil then
             local top = UpgradeSlot(slot, best, byID)
             if top then
                 Print(("slot %d: %s set to %s."):format(slot, top.name, top.sub or "the latest rank"))
@@ -495,7 +563,7 @@ local function CaptureSlots()
             elseif actionType == "macro" then
                 entry.name = Safe(GetActionText(slot)) or GetMacroInfo(id)
             end
-            entry.latest = IsLatest(slot)
+            if actionType == "spell" then entry.latest = RankStored(CharDB.latest[slot]) end
             slots[slot] = entry
             count = count + 1
             ProbeLine("capture slot %d: %s name=%s rank=%s latest=%s text=%s", slot, ActionText(slot),
@@ -598,17 +666,18 @@ local function PendingNames()
     return names
 end
 
+-- Rank option a loadout entry brings along (spells only), as offset.
+local function EntryOffset(entry)
+    if not entry or entry.t ~= "spell" then return nil end
+    if entry.latest == nil then return entryDefault end
+    return LatestOffset(entry.latest)
+end
+
 -- Rank option for a slot that holds a loadout entry: the slot's own option, else the one saved with the entry.
 local function SlotOffset(slot, entry)
     local offset = IsLatest(slot)
-    if offset == nil and entry then offset = LatestOffset(entry.latest) end
+    if offset == nil and entry then offset = EntryOffset(entry) end
     return offset
-end
-
--- Rank option a loadout entry brings along (spells only).
-local function EntryOffset(entry)
-    if entry and entry.t == "spell" then return LatestOffset(entry.latest) end
-    return nil
 end
 
 -- Before 1.2.0 all loadouts shared one rank option per slot and the slot's option won over the saved one.
@@ -619,10 +688,48 @@ local function MigrateRankOptions()
     CharDB.rankPerLoadout = true
     for _, loadout in ipairs(Loadouts()) do
         for slot, entry in pairs(loadout.slots or {}) do
-            local offset = IsLatest(slot)
+            local offset = LatestOffset(CharDB.latest[slot])
             if offset ~= nil and entry.t == "spell" then entry.latest = offset end
         end
     end
+end
+
+-- 1.4.0: the default rank option is "latest" instead of "keep". Once per character (bar slots) and once per class
+-- (loadouts): a spell without an option that sits below the highest known rank was put there on purpose and gets
+-- "keep"; everything else follows the latest rank from now on. Needs the spellbook, so it waits until that is there.
+-- again: run the check once more (tests).
+local function MigrateRankDefault(again)
+    if again then slotDefault, entryDefault = nil, nil end
+    if slotDefault ~= nil then return true end
+    local key = ClassKey()
+    DB.rankDefault = DB.rankDefault or {}
+    local _, best, byID = ReadSpellbook()
+    if not (CharDB.rankDefault and DB.rankDefault[key]) and not next(best) then return false end
+    if not CharDB.rankDefault then
+        for slot = 1, MAX_SLOT do
+            if CharDB.latest[slot] == nil then
+                local actionType, id = GetActionInfo(slot)
+                actionType, id = Safe(actionType), Safe(id)
+                local known = actionType == "spell" and id and byID[id]
+                local top = known and best[known.name]
+                if top and known.rank < top.rank then CharDB.latest[slot] = "keep" end
+            end
+        end
+        CharDB.rankDefault = true
+    end
+    if not DB.rankDefault[key] then
+        for _, loadout in ipairs(Loadouts()) do
+            for _, entry in pairs(loadout.slots or {}) do
+                if entry.t == "spell" and entry.latest == nil then
+                    local top = entry.name and best[entry.name]
+                    if top and (entry.rank or 0) < top.rank then entry.latest = "keep" end
+                end
+            end
+        end
+        DB.rankDefault[key] = true
+    end
+    slotDefault, entryDefault = DEFAULT_RANK, DEFAULT_RANK
+    return true
 end
 
 -- The loadout the bars belong to right now (last applied or saved). Bar and gear changes against it are offered
@@ -666,9 +773,9 @@ local function ApplyLoadout(loadout, reason, previousName)
         local entry = loadout.slots[slot]
         local before = run and ActionText(slot)
         local actionType = Safe(GetActionInfo(slot))
-        -- The rank options belong to the loadout: every slot gets the option saved with its entry, or none.
+        -- The rank options belong to the loadout: every slot gets the option saved with its entry, or the default.
         local offset = EntryOffset(entry)
-        SetLatest(slot, offset)
+        CharDB.latest[slot] = entry and entry.t == "spell" and RankStored(entry.latest) or nil
         if entry then
             local pickup, how = PickupForEntry(entry, best, byID, offset)
             if offset then how = how .. (" [rank: %s]"):format(RankOptionText(offset)) end
@@ -919,7 +1026,7 @@ local function AnswerDialog(d, accepted)
 end
 
 local function CreateDialog(key)
-    local d = CreateFrame("Frame", "ActionSlotPickerDialog_" .. key, UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+    local d = CreateFrame("Frame", "LoadoutManagerDialog_" .. key, UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
     d:SetWidth(340)
     d:SetFrameStrata("DIALOG")
     d:SetToplevel(true)
@@ -1023,13 +1130,18 @@ local function NewLoadoutDialog()
 end
 
 ------------------------------------------------------------------------
--- Loadout macro: "/asp load <name>" as a character macro, dragged from the loadout window onto a bar
+-- Loadout macro: "/lm load <name>" as a character macro, dragged from the loadout window onto a bar
 ------------------------------------------------------------------------
 
 local MACRO_NAME_MAX = 16
 local DEFAULT_ICONS = { "INV_Misc_Book_09", 134400 } -- book; question mark as fallback
 
 local function LoadoutMacroBody(name)
+    return "/lm load " .. name
+end
+
+-- Macros made before 2.0.0 say "/asp load <name>"; they still work and still count as the loadout's macro.
+local function OldLoadoutMacroBody(name)
     return "/asp load " .. name
 end
 
@@ -1049,11 +1161,12 @@ end
 
 -- Index of this character's macro that applies the loadout, if there is one.
 local function FindLoadoutMacro(name)
-    local body = LoadoutMacroBody(name)
+    local body, oldBody = LoadoutMacroBody(name), OldLoadoutMacroBody(name)
     local _, numChar = GetNumMacros()
     for i = ACCOUNT_MACROS + 1, ACCOUNT_MACROS + (numChar or 0) do
         local _, _, text = GetMacroInfo(i)
-        if text and strtrim(text) == body then return i end
+        text = text and strtrim(text)
+        if text == body or text == oldBody then return i end
     end
 end
 
@@ -1249,7 +1362,7 @@ local function RememberRank(slot)
     local known = byID[id]
     local name = (known and known.name) or C_Spell.GetSpellName(id)
     if id ~= entry.id and (not name or name ~= entry.name) then return end
-    entry.latest = IsLatest(slot)
+    entry.latest = RankStored(CharDB.latest[slot])
     entry.id, entry.rank = id, known and known.rank or entry.rank
     loadout.saved = date("%Y-%m-%d %H:%M")
     Changed()
@@ -1264,7 +1377,7 @@ local function SameAction(slot, saved, now)
     if saved.t == "spell" then
         if saved.id == now.id then return true end
         if not saved.name or saved.name ~= now.name then return false end
-        return SlotOffset(slot, saved) ~= nil or (saved.rank or 0) == (now.rank or 0)
+        return IsLatest(slot) ~= nil or (saved.rank or 0) == (now.rank or 0)
     elseif saved.t == "macro" then
         return saved.name == now.name
     end
@@ -1472,18 +1585,28 @@ local function AddMacros(root, target)
 end
 
 local RANK_OPTIONS = {
-    { label = "Keep this rank" },
     { offset = 0, label = "Latest" },
     { offset = 1, label = "Latest -1" },
     { offset = 2, label = "Latest -2" },
+    { label = "Keep this rank" },
 }
+
+-- Rank option for a spell picked from the menu: a lower rank picked on purpose stays ("keep"), the highest rank
+-- gets the default and follows new ranks.
+local function StoredForPick(action)
+    if action.t ~= "spell" then return nil end
+    local _, best = ReadSpellbook()
+    local top = action.name and best[action.name]
+    if top and (action.rank or 0) < top.rank then return "keep" end
+    return nil
+end
 
 -- "Spell rank" submenu: the rank option of this slot only.
 local function AddRankMenu(root, target)
     local desc = root:CreateButton("Spell rank: " .. RankOptionText(target.getRank()))
     desc:SetTooltip(function(tooltip)
         GameTooltip_SetTitle(tooltip, "Only this slot")
-        GameTooltip_AddNormalLine(tooltip, "Latest: the highest rank you know, also after learning a new one. Latest -1 / -2: one or two ranks below it (cheaper). Keep: the rank stays as placed.", true)
+        GameTooltip_AddNormalLine(tooltip, "Latest (the default): the highest rank you know, also after learning a new one. Latest -1 / -2: one or two ranks below it (cheaper). Keep: the rank stays as placed.", true)
     end)
     for _, option in ipairs(RANK_OPTIONS) do
         desc:CreateRadio(option.label, function() return target.getRank() == option.offset end,
@@ -1505,7 +1628,11 @@ end
 local function BarTarget(slot)
     return {
         slot = slot,
-        pick = function(action) PlaceInto(slot, action.pickup) end,
+        pick = function(action)
+            CharDB.latest[slot] = StoredForPick(action)
+            PlaceInto(slot, action.pickup)
+            RememberRank(slot)
+        end,
         getRank = function() return IsLatest(slot) end,
         setRank = function(offset)
             SetLatest(slot, offset)
@@ -1514,7 +1641,7 @@ local function BarTarget(slot)
         end,
         clear = function()
             ClearSlot(slot)
-            SetLatest(slot, nil)
+            CharDB.latest[slot] = nil
         end,
     }
 end
@@ -1539,18 +1666,15 @@ local function LoadoutTarget(loadout, slot)
             local old = loadout.slots[slot]
             loadout.slots[slot] = {
                 t = action.t, id = action.id, name = action.name, rank = action.rank,
-                latest = old and old.latest or nil,
+                latest = StoredForPick(action),
             }
             Touch()
         end,
-        getRank = function()
-            local entry = loadout.slots[slot]
-            return entry and LatestOffset(entry.latest)
-        end,
+        getRank = function() return EntryOffset(loadout.slots[slot]) end,
         setRank = function(offset)
             local entry = loadout.slots[slot]
-            if not entry then return end
-            entry.latest = LatestOffset(offset)
+            if not entry or entry.t ~= "spell" then return end
+            entry.latest = StoredFor(offset)
             Touch()
         end,
         clear = function()
@@ -1724,7 +1848,7 @@ local function OpenLoadoutMenu(owner)
 end
 
 local function CreateMinimapButton()
-    local b = CreateFrame("Button", "ActionSlotPickerMinimapButton", Minimap)
+    local b = CreateFrame("Button", "LoadoutManagerMinimapButton", Minimap)
     b:SetSize(31, 31)
     b:SetFrameStrata("MEDIUM")
     b:SetFrameLevel(Minimap:GetFrameLevel() + 8)
@@ -1768,7 +1892,7 @@ local function CreateMinimapButton()
     b:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
     b:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
-        GameTooltip_SetTitle(GameTooltip, "Action Slot Picker")
+        GameTooltip_SetTitle(GameTooltip, "Loadout Manager")
         local editing = EditingLoadout()
         if editing then
             GameTooltip_AddNormalLine(GameTooltip, ("|cff40ff40Editing loadout \"%s\"|r"):format(editing.name))
@@ -1789,6 +1913,68 @@ end
 ------------------------------------------------------------------------
 -- Events and slash command
 ------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+-- Data from the old name (Action Slot Picker, before 2.0.0)
+------------------------------------------------------------------------
+-- The game keeps saved variables per addon folder. The package therefore ships a folder "ActionSlotPicker" that
+-- holds nothing but the old saved variables (load on demand, marked X-Loadout-Manager-Data in its toc). At the
+-- first start under the new name its tables are copied: the account data once, the character data once per
+-- character. Only what the new tables do not have yet is taken, so nothing saved under the new name is replaced.
+local OLD_ADDON = "ActionSlotPicker"
+local OLD_DB, OLD_CHARDB = "ActionSlotPickerDB", "ActionSlotPickerCharDB"
+
+local function CopyOf(v)
+    if type(v) ~= "table" then return v end
+    local t = {}
+    for k, x in pairs(v) do t[k] = CopyOf(x) end
+    return t
+end
+
+local function OldAddonLoaded()
+    local A = C_AddOns
+    return A ~= nil and A.IsAddOnLoaded ~= nil and A.IsAddOnLoaded(OLD_ADDON) and true or false
+end
+
+-- The real old addon (not the data-only folder) is loaded: two of them would both hook the action buttons.
+local function OldAddonRuns()
+    if not OldAddonLoaded() then return false end
+    local A = C_AddOns
+    return not (A.GetAddOnMetadata and A.GetAddOnMetadata(OLD_ADDON, "X-Loadout-Manager-Data"))
+end
+
+local adoptedNow = false
+local function AdoptOldData()
+    local needAccount = not (LoadoutManagerDB and LoadoutManagerDB.adoptedOld)
+    local needChar = not (LoadoutManagerCharDB and LoadoutManagerCharDB.adoptedOld)
+    if not needAccount and not needChar then return end
+    if not OldAddonLoaded() and C_AddOns and C_AddOns.LoadAddOn then
+        pcall(C_AddOns.LoadAddOn, OLD_ADDON) -- brings the old saved variables into memory
+    end
+    local found = OldAddonLoaded()
+    local stamp = date("%Y-%m-%d %H:%M")
+    local function Adopt(newName, oldName)
+        local new, old = _G[newName] or {}, _G[oldName]
+        if type(old) == "table" then
+            for key, value in pairs(old) do
+                if new[key] == nil then
+                    new[key] = CopyOf(value)
+                elseif key == "loadouts" and type(value) == "table" and type(new[key]) == "table" then
+                    for class, list in pairs(value) do
+                        if new[key][class] == nil or next(new[key][class]) == nil then new[key][class] = CopyOf(list) end
+                    end
+                end
+            end
+            new.adoptedOld = stamp
+            adoptedNow = true
+        elseif found then
+            new.adoptedOld = "nothing to take over" -- the old folder is there, but it never saved anything here
+        end
+        _G[newName] = new
+    end
+    if needAccount then Adopt("LoadoutManagerDB", OLD_DB) end
+    if needChar then Adopt("LoadoutManagerCharDB", OLD_CHARDB) end
+end
 
 local needHook = true
 local ProbeSnapshot -- defined with the probe commands below; the login handler needs it
@@ -1858,7 +2044,7 @@ local function ScheduleGearCheck()
     end)
 end
 local function ScheduleUpgrade()
-    if not CharDB or not next(CharDB.latest) then return end
+    if not CharDB then return end
     if upgradeTimer then upgradeTimer:Cancel() end
     upgradeTimer = C_Timer.NewTimer(1, function()
         upgradeTimer = nil
@@ -1868,32 +2054,44 @@ end
 
 frame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" and arg1 == ADDON then
-        ActionSlotPickerDB = ActionSlotPickerDB or {}
-        DB = ActionSlotPickerDB
+        AdoptOldData()
+        LoadoutManagerDB = LoadoutManagerDB or {}
+        DB = LoadoutManagerDB
         DB.loadouts = DB.loadouts or {}
         DB.minimap = DB.minimap or {}
         DB.probe = DB.probe or {}
         DB.probe.runs = DB.probe.runs or {}
         DB.autoRank = nil -- 0.1.0 had one account-wide switch; it is per slot now
-        ActionSlotPickerCharDB = ActionSlotPickerCharDB or {}
-        CharDB = ActionSlotPickerCharDB
+        LoadoutManagerCharDB = LoadoutManagerCharDB or {}
+        CharDB = LoadoutManagerCharDB
         CharDB.latest = CharDB.latest or {}
-        for slot, v in pairs(CharDB.latest) do CharDB.latest[slot] = LatestOffset(v) end -- 0.2.x saved true
+        for slot, v in pairs(CharDB.latest) do CharDB.latest[slot] = RankStored(v) end -- 0.2.x saved true
         CharDB.specLoadouts = CharDB.specLoadouts or {}
     elseif event == "PLAYER_LOGIN" then
+        if OldAddonRuns() then
+            -- Both would answer the same clicks. The data is copied already; this one waits.
+            NS.off = true
+            frame:UnregisterAllEvents()
+            Print("the old addon Action Slot Picker is still installed. Delete the folder Interface\\AddOns\\ActionSlotPicker (or update it), then /reload. Loadout Manager stays off until then.")
+            return
+        end
         loggedIn = true
+        if adoptedNow then Print("took over your loadouts and settings from Action Slot Picker (the addon's old name).") end
         CharDB.specGroup = ActiveSpecGroup()
         MigrateRankOptions()
+        MigrateRankDefault()
+        SeeAllSlots()
         CreateMinimapButton()
         if HookButtons() then needHook = false end
         if EditingLoadout() then
-            Print(("still editing loadout \"%s\" - save or cancel it in the loadout window (/asp)."):format(CharDB.editing.name))
+            Print(("still editing loadout \"%s\" - save or cancel it in the loadout window (/lm)."):format(CharDB.editing.name))
         end
         if ProbeOn() then
             ProbeSnapshot("login")
-            Print("probe is ON (/asp probe off to stop recording).")
+            Print("probe is ON (/lm probe off to stop recording).")
         end
     elseif event == "ACTIONBAR_SLOT_CHANGED" then
+        NoteSlot(arg1)
         ScheduleBarsCheck()
     elseif event == "EQUIPMENT_SETS_CHANGED" then
         if loggedIn then SyncAllLoadoutMacroIcons() end -- a set icon changed in the Equipment Manager
@@ -1913,6 +2111,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         end
         FillPending("after combat")
     elseif event == "SPELLS_CHANGED" then
+        if loggedIn and slotDefault == nil and MigrateRankDefault() then SeeAllSlots() end
         if CharDB and CharDB.pending then
             if pendingTimer then pendingTimer:Cancel() end
             pendingTimer = C_Timer.NewTimer(0.5, function()
@@ -2016,26 +2215,28 @@ local function ProbeCommand(rest)
         Print("probe ON: every loadout step is recorded. Reproduce the problem, then /reload so it is written to disk.")
     elseif sub == "off" then
         DB.probe.enabled = nil
-        Print("probe OFF (recorded runs are kept, /asp probe clear deletes them).")
+        Print("probe OFF (recorded runs are kept, /lm probe clear deletes them).")
     elseif sub == "clear" then
         DB.probe.runs = {}
         Print("probe runs deleted.")
     elseif sub == "bars" then
-        if not ProbeOn() then Print("switch the probe on first: /asp probe on") return end
+        if not ProbeOn() then Print("switch the probe on first: /lm probe on") return end
         ProbeSnapshot("bars")
         Print("probe: current bars recorded.")
     elseif sub == "check" then
-        if not ProbeOn() then Print("switch the probe on first: /asp probe on") return end
+        if not ProbeOn() then Print("switch the probe on first: /lm probe on") return end
         ProbeCheck(arg)
     else
         Print(("probe is %s, %d runs recorded."):format(ProbeOn() and "ON" or "OFF", #DB.probe.runs))
-        Print("/asp probe on|off - record loadout steps   /asp probe bars - record the current bars")
-        Print("/asp probe check <loadout> - dry run, places nothing   /asp probe clear - delete runs")
+        Print("/lm probe on|off - record loadout steps   /lm probe bars - record the current bars")
+        Print("/lm probe check <loadout> - dry run, places nothing   /lm probe clear - delete runs")
     end
 end
 
-SLASH_ACTIONSLOTPICKER1 = "/asp"
-SlashCmdList.ACTIONSLOTPICKER = function(msg)
+SLASH_LOADOUTMANAGER1 = "/lm"
+SLASH_LOADOUTMANAGER2 = "/loadoutmanager"
+SLASH_LOADOUTMANAGER3 = "/asp" -- the addon's name before 2.0.0 (Action Slot Picker); old loadout macros use it
+SlashCmdList.LOADOUTMANAGER = function(msg)
     msg = strtrim(msg or "")
     local cmd, rest = msg:match("^(%S*)%s*(.-)$")
     cmd = (cmd or ""):lower()
@@ -2046,15 +2247,15 @@ SlashCmdList.ACTIONSLOTPICKER = function(msg)
     elseif cmd == "minimap" then
         DB.minimap.hide = not DB.minimap.hide
         minimapButton:SetShown(not DB.minimap.hide)
-        Print("minimap button " .. (DB.minimap.hide and "hidden (/asp minimap shows it again)." or "shown."))
+        Print("minimap button " .. (DB.minimap.hide and "hidden (/lm minimap shows it again)." or "shown."))
     elseif cmd == "rank" then
         local slots = {}
         for slot in pairs(CharDB.latest) do slots[#slots + 1] = slot end
         table.sort(slots)
         local parts = {}
-        for i, slot in ipairs(slots) do parts[i] = ("%d (%s)"):format(slot, RankOptionText(IsLatest(slot))) end
-        Print(#parts == 0 and "no slot has a rank option."
-            or ("rank options: " .. table.concat(parts, ", ")))
+        for i, slot in ipairs(slots) do parts[i] = ("%d (%s)"):format(slot, RankOptionText(LatestOffset(CharDB.latest[slot]))) end
+        Print(#parts == 0 and "every spell slot follows the latest rank (the default)."
+            or ("latest rank by default; set per slot: " .. table.concat(parts, ", ")))
     elseif cmd == "save" and rest ~= "" then
         SaveLoadout(rest, (FindLoadout(rest)))
     elseif cmd == "load" and rest ~= "" then
@@ -2071,16 +2272,16 @@ SlashCmdList.ACTIONSLOTPICKER = function(msg)
             Print(("%s - %d slots, saved %s"):format(loadout.name, CountSlots(loadout), loadout.saved or "?"))
         end
     else
-        Print("Shift + right-click an action button to open the picker. Minimap button or /asp: loadout window.")
-        Print("/asp menu - quick loadout menu")
-        Print("/asp minimap - show or hide the minimap button")
-        Print("/asp probe - diagnostics for loadouts (records every step, see /asp probe)")
-        Print("/asp rank - list the slots with a rank option (latest, -1, -2; set it in the slot's menu)")
-        Print("/asp save <name> | /asp load <name> | /asp list - action bar loadouts")
-        Print("/asp naked - armor and weapons into the bags, again to dress")
-        Print("/asp bankswap - on/off: a loadout or spec switch at the open bank swaps the sets through the bank")
-        Print("/asp sets - gear sets window: where every set piece is (worn, bags, bank)")
-        Print("/asp store <set> | /asp pickup <set> - equipment set to / from the bank (bank open)")
+        Print("Shift + right-click an action button to open the picker. Minimap button or /lm: loadout window.")
+        Print("/lm menu - quick loadout menu")
+        Print("/lm minimap - show or hide the minimap button")
+        Print("/lm probe - diagnostics for loadouts (records every step, see /lm probe)")
+        Print("/lm rank - list the slots with their own rank option (default: latest; set it in the slot's menu)")
+        Print("/lm save <name> | /lm load <name> | /lm list - action bar loadouts")
+        Print("/lm naked - armor and weapons into the bags, again to dress")
+        Print("/lm bankswap - on/off: a loadout or spec switch at the open bank swaps the sets through the bank")
+        Print("/lm sets - gear sets window: where every set piece is (worn, bags, bank)")
+        Print("/lm store <set> | /lm pickup <set> - equipment set to / from the bank (bank open)")
     end
 end
 
@@ -2096,6 +2297,8 @@ NS.CombatBlocked = CombatBlocked
 NS.CharDB = function() return CharDB end
 NS.DB = function() return DB end
 NS.LatestOffset = LatestOffset
+NS.EntryOffset = EntryOffset
+NS.MigrateRankDefault = MigrateRankDefault
 NS.RankOptionText = RankOptionText
 NS.ReadSpellbook = ReadSpellbook
 NS.MacroIndexByName = MacroIndexByName

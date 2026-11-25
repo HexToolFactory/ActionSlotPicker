@@ -1,4 +1,8 @@
-package-as: ActionSlotPicker
+package-as: LoadoutManager
+
+# The folder with the old saved variables becomes its own addon folder next to the main one.
+move-folders:
+  LoadoutManager/ActionSlotPicker: ActionSlotPicker
 
 manual-changelog:
   filename: CHANGELOG.md

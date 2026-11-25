@@ -1,10 +1,10 @@
--- Action Slot Picker: gear helpers
+-- Loadout Manager: gear helpers
 --   Equipment sets to and from the bank (only while the bank is open), worn pieces included.
 --   Set swap at the bank: a loadout or spec switch fetches the new set, equips it and stores the old one.
 --   Naked mode: armor and weapons into the bags, the same items back on later.
 --   Gear sets window: every set with its pieces and where each one is (worn, bags, bank, missing).
 --   Item comparison (Shift): next to the equipped item, the piece the other talent spec's set uses in that slot.
---   Set contents in the saved variables (ActionSlotPickerCharDB.sets), for tools outside the game.
+--   Set contents in the saved variables (LoadoutManagerCharDB.sets), for tools outside the game.
 -- Menu entries sit in the minimap button's quick menu; the "Gear sets" button at the bank opens the window.
 -- Items are moved the way a player does it: pick up, drop into a free slot. Out of combat only.
 
@@ -515,7 +515,7 @@ end
 
 local function ShowBankButton()
     if not bankButton then
-        bankButton = CreateFrame("Button", "ActionSlotPickerBankButton", UIParent, "UIPanelButtonTemplate")
+        bankButton = CreateFrame("Button", "LoadoutManagerBankButton", UIParent, "UIPanelButtonTemplate")
         bankButton:SetSize(96, 22)
         bankButton:SetFrameStrata("HIGH")
         bankButton:SetText("Gear sets")
@@ -530,7 +530,7 @@ local function ShowBankButton()
         end)
         bankButton:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip_SetTitle(GameTooltip, "Action Slot Picker")
+            GameTooltip_SetTitle(GameTooltip, "Loadout Manager")
             GameTooltip_AddNormalLine(GameTooltip, "Click: gear sets window (store, pick up)")
             GameTooltip_AddNormalLine(GameTooltip, "Right-click: quick menu")
             GameTooltip:Show()
@@ -552,6 +552,7 @@ events:RegisterEvent("EQUIPMENT_SETS_CHANGED")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("PLAYER_LOGOUT")
 events:SetScript("OnEvent", function(_, event)
+    if NS.off then return end -- the old addon is still running (see the main file)
     if event == "PLAYER_LOGOUT" then
         if NS.SaveSets then NS.SaveSets() end -- last state before the saved variables are written
         return
@@ -572,7 +573,7 @@ events:SetScript("OnEvent", function(_, event)
 end)
 
 ------------------------------------------------------------------------
--- Slash: /asp naked | /asp store <set> | /asp pickup <set>
+-- Slash: /lm naked | /lm store <set> | /lm pickup <set>
 ------------------------------------------------------------------------
 
 local function GearCommand(cmd, rest)
@@ -826,7 +827,7 @@ local function RefreshGear()
 end
 
 local function CreateGearWindow()
-    gearFrame = CreateFrame("Frame", "ActionSlotPickerGearFrame", UIParent, "BasicFrameTemplateWithInset")
+    gearFrame = CreateFrame("Frame", "LoadoutManagerGearFrame", UIParent, "BasicFrameTemplateWithInset")
     gearFrame:SetSize(GEAR_WIDTH, 200)
     gearFrame:SetFrameStrata("DIALOG")
     gearFrame:SetToplevel(true)
@@ -1001,7 +1002,7 @@ end
 local function CompareTip(i)
     local tip = compareTips[i]
     if tip then return tip end
-    tip = CreateFrame("GameTooltip", "ActionSlotPickerCompareTooltip" .. i, UIParent, "ShoppingTooltipTemplate")
+    tip = CreateFrame("GameTooltip", "LoadoutManagerCompareTooltip" .. i, UIParent, "ShoppingTooltipTemplate")
     tip:SetFrameStrata("TOOLTIP")
     tip:SetClampedToScreen(true)
     local waited = 0
@@ -1083,7 +1084,7 @@ local function PlaceCompareTips(tooltip, shown)
 end
 
 local function OnCompareItem(_, comparisonItem, tooltip)
-    if not comparisonItem or not tooltip or not tooltip.GetPrimaryTooltipData then
+    if NS.off or not comparisonItem or not tooltip or not tooltip.GetPrimaryTooltipData then
         HideCompare()
         return
     end
@@ -1118,9 +1119,9 @@ end
 ------------------------------------------------------------------------
 -- Set contents in the saved variables
 ------------------------------------------------------------------------
--- ActionSlotPickerCharDB.sets = { [set name] = { icon = fileID, items = { [inventory slot] = piece } } }
+-- LoadoutManagerCharDB.sets = { [set name] = { icon = fileID, items = { [inventory slot] = piece } } }
 --   piece = { id = itemID, name = "Item Name", link = hyperlink, where = "worn" | "bags" | "bank" | "missing" }
--- ActionSlotPickerCharDB.setsSaved = "2026-11-25 14:10"
+-- LoadoutManagerCharDB.setsSaved = "2026-11-25 14:10"
 -- Written whenever sets, gear, bags or the bank change, and at logout. The client writes the file itself at
 -- /reload and logout, so a tool outside the game sees the state of that moment.
 

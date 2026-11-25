@@ -1,16 +1,24 @@
 # Changelog
 
-## 1.4.0
+## 2.0.0
+- New name: **Loadout Manager** (was Action Slot Picker). The addon folder is `LoadoutManager` now. Your loadouts and
+  settings are taken over at the first login of each character; the small second folder `ActionSlotPicker` in the
+  package only holds the old saved data for that and can be deleted once all your characters have logged in.
+- The command is `/lm` (also `/loadoutmanager`). `/asp` keeps working, and so do your existing loadout macros.
+- Spell rank: "Latest" is the default now. A slot without its own choice follows the highest rank you know, also
+  after you learn a new one. A lower rank stays where you put it on purpose: picked from the slot menu or dragged
+  onto the bar, it is set to "Keep this rank". Your bars and loadouts are converted once: spells that sit below
+  your highest rank keep their rank, everything else follows the latest rank.
 - Set swap at the bank: with the bank open, switching the loadout or the talent spec fetches the new set from the
   bank, equips it and stores the old set, one step after the other. Pieces both sets use stay on. Away from the
   bank a switch works as before. Switch it off with the "Swap at bank" checkbox in the gear sets window or
-  `/asp bankswap`.
+  `/lm bankswap`.
 - Full bags are no obstacle for that swap: a piece that finds no room in the bags is swapped 1 by 1, straight from
   its bank slot onto you, and the piece you wore lands in that bank slot. A full bank works too, because the new
   set leaves its slots before the old one arrives.
 - "Store set in bank" also takes the pieces you are wearing, so a set you have on can go straight into the bank.
   A worn piece stays on when another set you carry (worn or in your bags) uses it too; the chat line says so.
-- The items of your equipment sets are written into the saved variables (`ActionSlotPickerCharDB.sets`, per
+- The items of your equipment sets are written into the saved variables (`LoadoutManagerCharDB.sets`, per
   character): per set its icon and, per slot, item id, name, link and where the piece is (worn, bags, bank,
   missing). Updated when sets, gear, bags or the bank change and at logout, for tools outside the game.
 

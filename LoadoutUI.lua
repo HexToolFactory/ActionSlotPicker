@@ -1,4 +1,4 @@
--- Action Slot Picker: loadout window (/asp or a click on the minimap button).
+-- Loadout Manager: loadout window (/lm or a click on the minimap button).
 -- Left: the class's loadouts. Right: buttons for the selected loadout and its slots, bar by bar.
 -- Click a slot to pick its spell, item or macro (same menu as on the bars) or set its rank option.
 -- Drop a spell, item or macro from the cursor onto a slot to put it there. Slot changes only touch the saved loadout.
@@ -106,7 +106,8 @@ local function EntryIcon(entry)
     return UNKNOWN_ICON, false
 end
 
-local RANK_MARK = { [0] = "L", [1] = "L-1", [2] = "L-2" }
+-- Mark on a loadout slot whose rank option is not the default (latest): K = keeps its rank, L-1 / L-2.
+local RANK_MARK = { [1] = "L-1", [2] = "L-2" }
 
 ------------------------------------------------------------------------
 -- Slot buttons
@@ -170,7 +171,7 @@ local function SlotOnEnter(button)
     end
     GameTooltip_AddNormalLine(GameTooltip, line)
     if entry and entry.t == "spell" then
-        GameTooltip_AddNormalLine(GameTooltip, "Spell rank: " .. NS.RankOptionText(NS.LatestOffset(entry.latest)))
+        GameTooltip_AddNormalLine(GameTooltip, "Spell rank: " .. NS.RankOptionText(NS.EntryOffset(entry)))
     end
     if PendingEntry(loadout, button.slot) then
         GameTooltip_AddColoredLine(GameTooltip, "Waits to be learned", NORMAL_FONT_COLOR)
@@ -224,8 +225,12 @@ local function UpdateSlot(b, loadout)
     else
         b.icon:SetVertexColor(1, 1, 1)
     end
-    local offset = entry.t == "spell" and NS.LatestOffset(entry.latest)
-    b.mark:SetText(offset and RANK_MARK[offset] or "")
+    local mark = ""
+    if entry.t == "spell" then
+        local offset = NS.EntryOffset(entry)
+        mark = offset == nil and "K" or RANK_MARK[offset] or ""
+    end
+    b.mark:SetText(mark)
     b.number:SetText("")
 end
 
@@ -432,7 +437,7 @@ local function SavePosition()
 end
 
 local function CreateWindow()
-    frame = CreateFrame("Frame", "ActionSlotPickerLoadoutFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame = CreateFrame("Frame", "LoadoutManagerLoadoutFrame", UIParent, "BasicFrameTemplateWithInset")
     frame:SetSize(WIDTH, HEIGHT)
     frame:SetFrameStrata("DIALOG")
     frame:SetToplevel(true)
@@ -538,7 +543,7 @@ local function CreateWindow()
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip_SetTitle(GameTooltip, "Loadout macro")
         GameTooltip_AddNormalLine(GameTooltip, "Drag onto an action bar: clicking it applies this loadout.", true)
-        if loadout then GameTooltip_AddNormalLine(GameTooltip, "/asp load " .. loadout.name) end
+        if loadout then GameTooltip_AddNormalLine(GameTooltip, "/lm load " .. loadout.name) end
         GameTooltip_AddInstructionLine(GameTooltip, "Created as a character macro the first time.")
         GameTooltip:Show()
     end)
@@ -629,7 +634,7 @@ local function CreateWindow()
 
     local legend = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     legend:SetPoint("BOTTOMRIGHT", d, "BOTTOMRIGHT", 0, 6)
-    legend:SetText("L = latest rank, L-1 / L-2 = below it")
+    legend:SetText("K = keeps its rank, L-1 / L-2 = below the latest")
 
     frame:SetScript("OnShow", Refresh)
     frame:RegisterEvent("EQUIPMENT_SETS_CHANGED")

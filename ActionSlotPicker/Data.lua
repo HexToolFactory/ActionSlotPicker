@@ -1,0 +1,3 @@
+-- Action Slot Picker is Loadout Manager now (since 2.0.0).
+-- This folder has no code. Its toc names the saved variables of the old addon, so the game loads them when
+-- Loadout Manager asks for this folder (load on demand) and can copy your loadouts and settings.

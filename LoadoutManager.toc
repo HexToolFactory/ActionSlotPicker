@@ -1,0 +1,15 @@
+## Interface: 16001
+## Title: Loadout Manager
+## Version: @project-version@
+## Author: HexToolFactory
+## Notes: Action bar loadouts with their own window, bound to talent specs and equipment sets. Sets to and from the bank, set swap at the bank, naked mode. Shift + right-click an action button to pick a spell (by rank), bag item or macro for that slot.
+## X-Curse-Project-ID: 1787162
+## Category: Action Bars
+## OptionalDeps: ActionSlotPicker
+## SavedVariables: LoadoutManagerDB
+## SavedVariablesPerCharacter: LoadoutManagerCharDB
+## DefaultState: Enabled
+
+LoadoutManager.lua
+Gear.lua
+LoadoutUI.lua
