@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.4.0
+- Set swap at the bank: with the bank open, switching the loadout or the talent spec fetches the new set from the
+  bank, equips it and stores the old set, one step after the other. Pieces both sets use stay on. Away from the
+  bank a switch works as before. Switch it off with the "Swap at bank" checkbox in the gear sets window or
+  `/asp bankswap`.
+- Full bags are no obstacle for that swap: a piece that finds no room in the bags is swapped 1 by 1, straight from
+  its bank slot onto you, and the piece you wore lands in that bank slot. A full bank works too, because the new
+  set leaves its slots before the old one arrives.
+- "Store set in bank" also takes the pieces you are wearing, so a set you have on can go straight into the bank.
+  A worn piece stays on when another set you carry (worn or in your bags) uses it too; the chat line says so.
+- The items of your equipment sets are written into the saved variables (`ActionSlotPickerCharDB.sets`, per
+  character): per set its icon and, per slot, item id, name, link and where the piece is (worn, bags, bank,
+  missing). Updated when sets, gear, bags or the bank change and at logout, for tools outside the game.
+
 ## 1.3.0
 - Equipment sets and the bank: "Store set in bank" moves the set's pieces from your bags into the bank, "Pick up set
   from bank" brings them back. Worn pieces stay on. In the minimap button's right-click menu and in a new "Gear sets"

@@ -20,8 +20,12 @@ account; spells and macros are matched by name. Right-click the minimap button f
 
 **Gear** (right-click the minimap button, or the "Gear sets" button at the bank window):
 
-- **Store set in bank / Pick up set from bank**: moves the pieces of an equipment set between your bags and the bank
-  while the bank is open. Worn pieces stay on. `/asp store <set>`, `/asp pickup <set>`
+- **Store set in bank / Pick up set from bank**: moves the pieces of an equipment set between you and the bank while
+  the bank is open. Store takes the pieces in your bags and the ones you wear; a worn piece stays on when another set
+  you carry uses it too. `/asp store <set>`, `/asp pickup <set>`
+- **Set swap at the bank**: with the bank open, switching the loadout or the talent spec fetches the new loadout's set
+  from the bank, equips it and stores the set of the loadout before. "Swap at bank" checkbox in the gear sets window,
+  or `/asp bankswap`
 - **Naked mode**: armor and weapons go into your bags, so dying costs no durability; switch it off and the same pieces
   go back on. `/asp naked`
 - **Gear sets window** (`/asp sets`): every equipment set with its pieces and where each one is: worn, bags, bank or
@@ -29,6 +33,10 @@ account; spells and macros are matched by name. Right-click the minimap button f
 - **Other spec in the item comparison**: hold Shift on an item and, next to the equipped piece, a tooltip
   "Other spec: <set>" shows what your other talent spec wears in that slot (the equipment set of the loadout bound
   to that spec)
+
+**Saved variables**: the items of every equipment set are stored per character in `ActionSlotPickerCharDB.sets`
+(`[set name].items[inventory slot] = { id, name, link, where }`, `where` = worn, bags, bank or missing), with the
+time in `setsSaved`. The game writes the file at `/reload` and logout.
 
 **Loadout macro**: drag the book icon next to the loadout's name onto an action bar. Clicking that button applies the
 loadout (`/asp load <name>`, created as a character macro the first time).

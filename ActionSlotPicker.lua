@@ -445,7 +445,9 @@ local function EquippedSetName()
 end
 
 -- Equips the set bound to a loadout. Called out of combat only (ApplyLoadout checks).
-local function EquipBoundSet(name)
+-- previousSet: name of the set the loadout before this one used. At the open bank Gear.lua swaps the two sets
+-- through the bank (fetch the new one, equip, store the old one); it calls Equip when the pieces have arrived.
+local function EquipBoundSet(name, previousSet, viaBank)
     if not name then return end
     local set = FindEquipmentSet(name)
     if not set then
@@ -453,19 +455,27 @@ local function EquipBoundSet(name)
         ProbeLine("equipment set %s: not on this character", name)
         return
     end
-    if set.equipped then
-        ProbeLine("equipment set %s: already equipped", name)
+    local function Equip()
+        local now = FindEquipmentSet(name) or set
+        if now.equipped then
+            ProbeLine("equipment set %s: already equipped", name)
+            return
+        end
+        NS.equipQuietUntil = GetTime() + 4 -- the swap fires many equipment events; CheckGear waits for it
+        local ok = C_EquipmentSet.UseEquipmentSet(now.setID)
+        ProbeLine("equipment set %s (id %s): UseEquipmentSet -> %s, items lost %s", name, tostring(now.setID), tostring(ok), tostring(now.lost))
+        if ok then
+            CharDB.naked = nil -- dressed by the set: naked mode (Gear.lua) is over
+            Print(("equipped \"%s\"."):format(name))
+        else
+            Print(("could not equip \"%s\"."):format(name))
+        end
+    end
+    if viaBank and NS.SwapThroughBank and NS.SwapThroughBank(set, previousSet, Equip) then
+        ProbeLine("equipment set %s: swap through the bank (old set %s)", name, tostring(previousSet))
         return
     end
-    NS.equipQuietUntil = GetTime() + 4 -- the swap fires many equipment events; CheckGear waits for it
-    local ok = C_EquipmentSet.UseEquipmentSet(set.setID)
-    ProbeLine("equipment set %s (id %s): UseEquipmentSet -> %s, items lost %s", name, tostring(set.setID), tostring(ok), tostring(set.lost))
-    if ok then
-        CharDB.naked = nil -- dressed by the set: naked mode (Gear.lua) is over
-        Print(("equipped \"%s\"."):format(name))
-    else
-        Print(("could not equip \"%s\"."):format(name))
-    end
+    Equip()
 end
 
 local function CaptureSlots()
@@ -634,7 +644,18 @@ local function InSwitch()
     return NS.switchQuietUntil ~= nil and GetTime() < NS.switchQuietUntil
 end
 
-local function ApplyLoadout(loadout, reason)
+-- Starts that quiet time (a loadout was applied, or Gear.lua took worn set pieces to the bank).
+local function BeginSwitchQuiet()
+    NS.switchQuietUntil = GetTime() + SWITCH_QUIET
+    C_Timer.After(SWITCH_QUIET - 0.5, function() -- last look inside the quiet time: the baseline
+        if NS.CheckBars then NS.CheckBars() end
+        if NS.CheckGear then NS.CheckGear() end
+    end)
+end
+
+-- previousName: the loadout that was on the bars before, when the caller knows better than CharDB.active
+-- (a spec switch before any loadout was applied).
+local function ApplyLoadout(loadout, reason, previousName)
     if CombatBlocked() then return end
     local run = ProbeBegin("apply", ("%s (%s)"):format(loadout.name, reason or "apply"))
     local _, best, byID = ReadSpellbook()
@@ -683,18 +704,20 @@ local function ApplyLoadout(loadout, reason)
         end
     end
     CharDB.pending = next(pending.slots) and pending or nil
-    if reason ~= "edit start" and reason ~= "cancel edit" then
+    local switching = reason ~= "edit start" and reason ~= "cancel edit"
+    local previousSet
+    if switching then
+        previousName = CharDB.active or previousName
+        for _, l in ipairs(Loadouts()) do
+            if l ~= loadout and l.name == previousName then previousSet = l.equipmentSet end
+        end
         for _, l in ipairs(Loadouts()) do
             if l == loadout then SetActive(loadout) end
         end
     end
     Print(("loadout \"%s\" applied: %d placed, %d cleared."):format(loadout.name, placed, cleared))
-    EquipBoundSet(loadout.equipmentSet)
-    NS.switchQuietUntil = GetTime() + SWITCH_QUIET
-    C_Timer.After(SWITCH_QUIET - 0.5, function() -- last look inside the quiet time: the baseline
-        if NS.CheckBars then NS.CheckBars() end
-        if NS.CheckGear then NS.CheckGear() end
-    end)
+    EquipBoundSet(loadout.equipmentSet, previousSet, switching)
+    BeginSwitchQuiet()
     if #waiting > 0 then
         table.sort(waiting)
         Print(("not known yet, placed as soon as you learn them (e.g. after switching talents): %s"):format(table.concat(waiting, ", ")))
@@ -1782,13 +1805,14 @@ pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_SKILL_LINE")
 pcall(frame.RegisterEvent, frame, "LEARNED_SPELL_IN_TAB")
 
 local upgradeTimer, pendingTimer, barsTimer, gearTimer, specTimer
-local pendingSpecApply
+local pendingSpecApply, pendingSpecBefore
 -- The spec switched: apply the loadout bound to the new spec (after a moment, so the new spells and the client's own
 -- bar swap are in place). Without any spec binding nothing happens.
 local function OnSpecChanged()
     if not CharDB then return end
     local group = ActiveSpecGroup()
     if group == CharDB.specGroup then return end
+    local before = CharDB.specLoadouts[CharDB.specGroup or 0] -- the loadout of the spec we come from
     CharDB.specGroup = group
     if not next(CharDB.specLoadouts) then return end
     NS.specQuietUntil = GetTime() + 3
@@ -1807,10 +1831,10 @@ local function OnSpecChanged()
     specTimer = C_Timer.NewTimer(1.5, function()
         specTimer = nil
         if InCombatLockdown() then
-            pendingSpecApply = loadout
+            pendingSpecApply, pendingSpecBefore = loadout, before
             return
         end
-        ApplyLoadout(loadout, "spec " .. group)
+        ApplyLoadout(loadout, "spec " .. group, before)
     end)
 end
 local loggedIn = false
@@ -1885,7 +1909,7 @@ frame:SetScript("OnEvent", function(_, event, arg1)
         if pendingSpecApply then
             local loadout = pendingSpecApply
             pendingSpecApply = nil
-            ApplyLoadout(loadout, "spec switch after combat")
+            ApplyLoadout(loadout, "spec switch after combat", pendingSpecBefore)
         end
         FillPending("after combat")
     elseif event == "SPELLS_CHANGED" then
@@ -2039,7 +2063,7 @@ SlashCmdList.ACTIONSLOTPICKER = function(msg)
     elseif cmd == "probe" then
         ProbeCommand(rest)
     elseif NS.GearCommand and NS.GearCommand(cmd, rest) then
-        -- sets, naked, store <set>, pickup <set> (Gear.lua)
+        -- sets, naked, bankswap, store <set>, pickup <set> (Gear.lua)
     elseif cmd == "list" then
         local list = Loadouts()
         if #list == 0 then Print("no loadouts for this class yet.") end
@@ -2054,6 +2078,7 @@ SlashCmdList.ACTIONSLOTPICKER = function(msg)
         Print("/asp rank - list the slots with a rank option (latest, -1, -2; set it in the slot's menu)")
         Print("/asp save <name> | /asp load <name> | /asp list - action bar loadouts")
         Print("/asp naked - armor and weapons into the bags, again to dress")
+        Print("/asp bankswap - on/off: a loadout or spec switch at the open bank swaps the sets through the bank")
         Print("/asp sets - gear sets window: where every set piece is (worn, bags, bank)")
         Print("/asp store <set> | /asp pickup <set> - equipment set to / from the bank (bank open)")
     end
@@ -2095,6 +2120,7 @@ NS.StopWaiting = StopWaiting
 NS.EquipmentSets = EquipmentSets
 NS.FindEquipmentSet = FindEquipmentSet
 NS.ActiveSpecGroup = ActiveSpecGroup
+NS.BeginSwitchQuiet = BeginSwitchQuiet
 NS.AddEquipmentSetRadios = AddEquipmentSetRadios
 NS.BuildSlotMenu = BuildSlotMenu
 NS.LoadoutTarget = LoadoutTarget

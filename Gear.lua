@@ -1,8 +1,10 @@
 -- Action Slot Picker: gear helpers
---   Equipment sets to and from the bank (only while the bank is open).
+--   Equipment sets to and from the bank (only while the bank is open), worn pieces included.
+--   Set swap at the bank: a loadout or spec switch fetches the new set, equips it and stores the old one.
 --   Naked mode: armor and weapons into the bags, the same items back on later.
 --   Gear sets window: every set with its pieces and where each one is (worn, bags, bank, missing).
 --   Item comparison (Shift): next to the equipped item, the piece the other talent spec's set uses in that slot.
+--   Set contents in the saved variables (ActionSlotPickerCharDB.sets), for tools outside the game.
 -- Menu entries sit in the minimap button's quick menu; the "Gear sets" button at the bank opens the window.
 -- Items are moved the way a player does it: pick up, drop into a free slot. Out of combat only.
 
@@ -11,6 +13,7 @@ local Print, Safe, Icon = NS.Print, NS.Safe, NS.Icon
 
 local BAGS = { 0, 1, 2, 3, 4 }
 local bankOpen = false
+local SetPieces -- defined with the set pieces below; storing a set needs it
 
 ------------------------------------------------------------------------
 -- Bags and bank
@@ -52,9 +55,14 @@ local function FreeSlots(bags, generalOnly)
     return free
 end
 
+-- item.inv: a worn piece (inventory slot), else a bag item (bag, slot).
 local function Move(item, target)
     ClearCursor()
-    C_Container.PickupContainerItem(item.bag, item.slot)
+    if item.inv then
+        PickupInventoryItem(item.inv)
+    else
+        C_Container.PickupContainerItem(item.bag, item.slot)
+    end
     C_Container.PickupContainerItem(target.bag, target.slot)
     ClearCursor() -- a drop that did not work puts the item back
 end
@@ -116,25 +124,67 @@ local function MoveAll(items, free)
     return moved, noRoom, locked
 end
 
-local function Report(set, moved, noRoom, locked, done, nothing, full)
+local function Report(set, moved, noRoom, locked, done, nothing, full, note)
+    note = note or ""
     if moved == 0 and noRoom == 0 and locked == 0 then
-        Print(("%s: %s"):format(set.name, nothing))
+        Print(("%s: %s%s."):format(set.name, nothing, note))
         return
     end
     local text = ("%s: %d %s"):format(set.name, moved, done)
     if noRoom > 0 then text = text .. (", %d left (%s)"):format(noRoom, full) end
     if locked > 0 then text = text .. (", %d locked - try again"):format(locked) end
-    Print(text .. ".")
+    Print(text .. note .. ".")
 end
 
--- Bags -> bank: every piece of the set that lies in the bags. Worn pieces stay on.
+-- Items of other sets that are with the character (more than half of the set worn or in the bags):
+-- itemID -> name of that set. A worn piece another such set uses stays on when a set is stored.
+local function NeededElsewhere(set)
+    local used = {}
+    for _, other in ipairs(NS.EquipmentSets()) do
+        if other.setID ~= set.setID then
+            local pieces, counts = SetPieces(other)
+            if #pieces > 0 and (counts.worn + counts.bags) * 2 > #pieces then
+                for _, piece in ipairs(pieces) do used[piece.id] = used[piece.id] or other.name end
+            end
+        end
+    end
+    return used
+end
+
+-- The worn pieces of a set that go to the bank with it: list for MoveAll, and how many stay on for which set.
+local function WornToStore(set)
+    local elsewhere = NeededElsewhere(set)
+    local items, kept, keptFor = {}, 0, nil
+    for _, piece in ipairs((SetPieces(set))) do
+        if piece.where == "worn" and piece.inv then
+            if elsewhere[piece.id] then
+                kept, keptFor = kept + 1, elsewhere[piece.id]
+            else
+                items[#items + 1] = {
+                    inv = piece.inv, id = piece.id,
+                    locked = (IsInventoryItemLocked and IsInventoryItemLocked(piece.inv)) and true or false,
+                }
+            end
+        end
+    end
+    return items, kept, keptFor
+end
+
+-- Bags and body -> bank: every piece of the set that lies in the bags or is worn. A worn piece stays on when
+-- another set you carry uses it too.
 local function StoreSet(set)
     if not BankReady() then return end
     local need = Needed(set)
     Collect(need, BankBags()) -- pieces already in the bank do not pull a spare copy after them
     local items = Collect(need, BAGS)
+    local worn, kept, keptFor = WornToStore(set)
+    for _, item in ipairs(worn) do items[#items + 1] = item end
+    -- Taking gear off is not a change to save into the set: the prompt takes the new state as its baseline.
+    if #worn > 0 and NS.BeginSwitchQuiet then NS.BeginSwitchQuiet() end
     local moved, noRoom, locked = MoveAll(items, FreeSlots(BankBags()))
-    Report(set, moved, noRoom, locked, "stored in the bank", "nothing in your bags.", "bank full")
+    local note = kept > 0 and (", %d %s on (also in %s)"):format(kept, kept == 1 and "stays" or "stay", keptFor) or ""
+    Report(set, moved, noRoom, locked, "stored in the bank", "nothing to store", "bank full", note)
+    return moved, noRoom, locked
 end
 
 -- Bank -> bags: every piece of the set that is neither worn nor in the bags already.
@@ -144,13 +194,151 @@ local function PickupSet(set)
     Collect(need, BAGS) -- pieces already in the bags are not fetched a second time
     local items = Collect(need, BankBags())
     local moved, noRoom, locked = MoveAll(items, FreeSlots(BAGS, true))
-    Report(set, moved, noRoom, locked, "picked up from the bank", "nothing in the bank.", "bags full")
+    Report(set, moved, noRoom, locked, "picked up from the bank", "nothing in the bank", "bags full")
+    return moved, noRoom, locked
 end
 
 local function FindSet(name)
     for _, set in ipairs(NS.EquipmentSets()) do
         if set.name:lower() == name:lower() then return set end
     end
+end
+
+------------------------------------------------------------------------
+-- Set swap through the bank on a loadout or spec switch
+------------------------------------------------------------------------
+-- With the bank open, the main file hands the equip step over to SwapThroughBank:
+--   1. the new set's pieces come out of the bank into the bags
+--   2. the set is equipped (the old pieces drop into the bags)
+--   3. the old set goes into the bank
+-- The server moves items one at a time, so each step waits until the step before has arrived (or gives up after
+-- a few seconds and goes on).
+-- No room in the bags for a piece: it is swapped 1 by 1, straight from its bank slot onto the body, and the piece
+-- worn there drops into that bank slot. That needs no free slot anywhere. A full bank is no problem either: the
+-- new set leaves its slots before the old one arrives. What still did not move gets a second round after step 3.
+-- Account option DB.bankSwap = false switches it off.
+
+local SWAP_POLL, SWAP_TRIES = 0.3, 20 -- wait up to 6 s for a step
+local swap -- the running swap; a newer one replaces it
+
+local function SwapEnabled()
+    local db = NS.DB()
+    return db ~= nil and db.bankSwap ~= false
+end
+
+-- Pieces of the set that lie in the bank (not worn, no copy in the bags) / in the bags (not worn).
+local function InBank(set)
+    local need = Needed(set)
+    Collect(need, BAGS)
+    return #Collect(need, BankBags())
+end
+
+local function InBags(set)
+    return #Collect(Needed(set), BAGS)
+end
+
+local function SwapQuiet()
+    if NS.BeginSwitchQuiet then NS.BeginSwitchQuiet() end -- no "save gear?" prompt for what the swap moves
+end
+
+-- 1 by 1: every piece of the set that still lies in the bank goes straight into its slot on the body; the piece
+-- worn there lands in the bank slot. The game's own equipment manager equips a bank item the same way (pick up the
+-- bank item, drop it on the inventory slot). Pieces on their way to the bags are locked and left alone.
+local function SwapDirect(set)
+    local ids = C_EquipmentSet.GetItemIDs(set.setID) or {}
+    local need = Needed(set)
+    Collect(need, BAGS) -- a copy in the bags is equipped by the set itself
+    local banked = Collect(need, BankBags())
+    local swapped = 0
+    for invSlot = 1, 19 do
+        local id = Safe(ids[invSlot])
+        if type(id) == "number" and id > 0 and Safe(GetInventoryItemID("player", invSlot)) ~= id then
+            for i, item in ipairs(banked) do
+                if item.id == id and not item.locked and not (IsInventoryItemLocked and IsInventoryItemLocked(invSlot)) then
+                    table.remove(banked, i)
+                    ClearCursor()
+                    C_Container.PickupContainerItem(item.bag, item.slot)
+                    local fits = not (C_PaperDollInfo and C_PaperDollInfo.CursorCanGoInSlot)
+                        or C_PaperDollInfo.CursorCanGoInSlot(invSlot)
+                    if fits then
+                        PickupInventoryItem(invSlot)
+                        swapped = swapped + 1
+                    end
+                    ClearCursor()
+                    break
+                end
+            end
+        end
+    end
+    return swapped
+end
+
+local function SwapThroughBank(set, oldSetName, equip)
+    if not bankOpen or not SwapEnabled() or InCombatLockdown() then return false end
+    local token = { round = 1 }
+    swap = token
+    local Fetch, Equip, Store
+
+    local function CanBank()
+        return bankOpen and not InCombatLockdown()
+    end
+
+    local function Wait(arrived, nextStep)
+        local tries = 0
+        local function Poll()
+            if swap ~= token then return end
+            tries = tries + 1
+            if arrived() or tries >= SWAP_TRIES then nextStep() else C_Timer.After(SWAP_POLL, Poll) end
+        end
+        C_Timer.After(SWAP_POLL, Poll)
+    end
+
+    local function Finish()
+        if swap == token then swap = nil end
+        SwapQuiet()
+    end
+
+    function Store()
+        if swap ~= token then return end
+        SwapQuiet()
+        local old = oldSetName and oldSetName:lower() ~= set.name:lower() and FindSet(oldSetName) or nil
+        if old and CanBank() and (InBags(old) > 0 or #WornToStore(old) > 0) then StoreSet(old) end
+        if CanBank() and token.round < 2 and InBank(set) > 0 then
+            token.round = 2 -- pieces that did not fit into the bags: once more, now that the old set is gone
+            Wait(function() return old == nil or InBags(old) == 0 end, Fetch)
+        else
+            Finish()
+        end
+    end
+
+    function Equip()
+        if swap ~= token then return end
+        SwapQuiet()
+        equip()
+        Wait(function() return InBags(set) == 0 end, Store)
+    end
+
+    function Fetch()
+        if swap ~= token then return end
+        SwapQuiet()
+        if CanBank() and InBank(set) > 0 then
+            local _, noRoom, locked = PickupSet(set)
+            local left = (noRoom or 0) + (locked or 0)
+            if (noRoom or 0) > 0 then
+                local direct = SwapDirect(set)
+                if direct > 0 then
+                    left = math.max(0, left - direct)
+                    Print(("%s: %d swapped 1 by 1 with the bank (bags full)."):format(set.name, direct))
+                end
+            end
+            Wait(function() return not bankOpen or InBank(set) <= left end, Equip)
+        else
+            Equip()
+        end
+    end
+
+    Fetch()
+    return true
 end
 
 ------------------------------------------------------------------------
@@ -282,7 +470,7 @@ local function AddGearMenu(root)
     local store = AddSetList(root, "Store set in bank", StoreSet)
     store:SetTooltip(function(tooltip)
         GameTooltip_SetTitle(tooltip, "Store set in bank")
-        GameTooltip_AddNormalLine(tooltip, "Set pieces in your bags go into the bank. Worn pieces stay on.", true)
+        GameTooltip_AddNormalLine(tooltip, "Set pieces in your bags and on you go into the bank. A worn piece stays on if another set you carry uses it.", true)
     end)
     local pickup = AddSetList(root, "Pick up set from bank", PickupSet)
     pickup:SetTooltip(function(tooltip)
@@ -361,7 +549,14 @@ events:RegisterEvent("BANKFRAME_CLOSED")
 events:RegisterEvent("BAG_UPDATE_DELAYED")
 events:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 events:RegisterEvent("EQUIPMENT_SETS_CHANGED")
+events:RegisterEvent("PLAYER_LOGIN")
+events:RegisterEvent("PLAYER_LOGOUT")
 events:SetScript("OnEvent", function(_, event)
+    if event == "PLAYER_LOGOUT" then
+        if NS.SaveSets then NS.SaveSets() end -- last state before the saved variables are written
+        return
+    end
+    if NS.SaveSetsSoon then NS.SaveSetsSoon() end
     if event == "BANKFRAME_OPENED" then
         bankOpen = true
         ShowBankButton()
@@ -385,6 +580,10 @@ local function GearCommand(cmd, rest)
         NS.ToggleGear(true)
     elseif cmd == "naked" then
         ToggleNaked()
+    elseif cmd == "bankswap" then
+        NS.DB().bankSwap = not SwapEnabled()
+        Print("set swap at the bank on a loadout or spec switch: " .. (SwapEnabled() and "on." or "off."))
+        if NS.RefreshGear then NS.RefreshGear() end
     elseif (cmd == "store" or cmd == "pickup") and rest ~= "" then
         local set = FindSet(rest)
         if not set then
@@ -463,9 +662,9 @@ local WHERE = {
     missing = { text = "Missing", r = 1.00, g = 0.25, b = 0.25, hex = "ff4040" },
 }
 
--- pieces = { { slot, id, where, link } } in slot order, counts = { worn, bags, bank, missing }.
--- "bank" comes from the bank memory, so it also shows away from the bank.
-local function SetPieces(set)
+-- pieces = { { slot, id, where, link, inv } } in slot order, counts = { worn, bags, bank, missing }.
+-- inv = the inventory slot a worn piece is in. "bank" comes from the bank memory, so it also shows away from the bank.
+function SetPieces(set) -- assigns the local declared at the top
     local db = NS.CharDB()
     local ids = C_EquipmentSet.GetItemIDs(set.setID) or {}
     local inBags = BagGear()
@@ -478,9 +677,9 @@ local function SetPieces(set)
             local piece = { slot = invSlot, id = id }
             local other = PAIRED[invSlot]
             if Safe(GetInventoryItemID("player", invSlot)) == id then
-                piece.where, piece.link = "worn", Safe(GetInventoryItemLink("player", invSlot))
+                piece.where, piece.inv, piece.link = "worn", invSlot, Safe(GetInventoryItemLink("player", invSlot))
             elseif other and Safe(ids[other]) ~= id and Safe(GetInventoryItemID("player", other)) == id then
-                piece.where, piece.link = "worn", Safe(GetInventoryItemLink("player", other)) -- in the twin slot
+                piece.where, piece.inv, piece.link = "worn", other, Safe(GetInventoryItemLink("player", other)) -- in the twin slot
             elseif inBags[id] and #inBags[id] > 0 then
                 piece.where, piece.link = "bags", table.remove(inBags[id], 1)
             else
@@ -587,7 +786,7 @@ local function GearRow(i)
     row.status:SetPoint("LEFT", row.name, "RIGHT", 10, 0)
     row.pickup = RowButton(row, "Pick up", 70, PickupSet, "Set pieces in the bank come into your bags.")
     row.pickup:SetPoint("TOPRIGHT", 0, -2)
-    row.store = RowButton(row, "Store", 60, StoreSet, "Set pieces in your bags go into the bank. Worn pieces stay on.")
+    row.store = RowButton(row, "Store", 60, StoreSet, "Set pieces in your bags and on you go into the bank. A worn piece stays on if another set you carry uses it.")
     row.store:SetPoint("RIGHT", row.pickup, "LEFT", -4, 0)
     gearRows[i] = row
     return row
@@ -602,7 +801,7 @@ local function RefreshGear()
         row.icon:SetTexture(set.icon)
         row.name:SetText(set.name)
         row.status:SetText(SetSummary(counts))
-        row.store:SetEnabled(bankOpen and counts.bags > 0)
+        row.store:SetEnabled(bankOpen and (counts.bags > 0 or #WornToStore(set) > 0))
         row.pickup:SetEnabled(bankOpen and counts.bank > 0)
         for p, piece in ipairs(pieces) do
             local b = PieceButton(row, p)
@@ -622,6 +821,7 @@ local function RefreshGear()
     gearFrame.seen:SetText(db and db.bank and ("Bank seen: " .. db.bank.seen .. (bankOpen and " (open)" or ""))
         or "|cffff4040Bank not seen yet - open it once.|r")
     gearFrame.naked:SetChecked(IsNaked())
+    gearFrame.auto:SetChecked(SwapEnabled())
     gearFrame:SetHeight(34 + math.max(1, #sets) * ROW_HEIGHT + 54)
 end
 
@@ -677,6 +877,24 @@ local function CreateGearWindow()
     end)
     naked:SetScript("OnLeave", function() GameTooltip:Hide() end)
     gearFrame.naked = naked
+
+    local auto = CreateFrame("CheckButton", nil, gearFrame, "UICheckButtonTemplate")
+    auto:SetSize(24, 24)
+    auto:SetPoint("BOTTOMLEFT", naked, "TOPLEFT", 0, -2)
+    auto.label = auto:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    auto.label:SetPoint("LEFT", auto, "RIGHT", 2, 0)
+    auto.label:SetText("Swap at bank")
+    auto:SetScript("OnClick", function(self)
+        NS.DB().bankSwap = self:GetChecked() and true or false
+    end)
+    auto:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip_SetTitle(GameTooltip, "Swap sets at the bank")
+        GameTooltip_AddNormalLine(GameTooltip, "With the bank open, switching the loadout or the talent spec fetches the new set from the bank, equips it and stores the old set.", true)
+        GameTooltip:Show()
+    end)
+    auto:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    gearFrame.auto = auto
     gearFrame:Hide()
 end
 
@@ -897,6 +1115,54 @@ if TooltipComparisonManager and TooltipComparisonManager.CompareItem and hooksec
     end)
 end
 
+------------------------------------------------------------------------
+-- Set contents in the saved variables
+------------------------------------------------------------------------
+-- ActionSlotPickerCharDB.sets = { [set name] = { icon = fileID, items = { [inventory slot] = piece } } }
+--   piece = { id = itemID, name = "Item Name", link = hyperlink, where = "worn" | "bags" | "bank" | "missing" }
+-- ActionSlotPickerCharDB.setsSaved = "2026-11-25 14:10"
+-- Written whenever sets, gear, bags or the bank change, and at logout. The client writes the file itself at
+-- /reload and logout, so a tool outside the game sees the state of that moment.
+
+local function SaveSets()
+    local db = NS.CharDB()
+    if not db then return end
+    local before = db.sets or {}
+    local sets = {}
+    for _, set in ipairs(NS.EquipmentSets()) do
+        local old = before[set.name] and before[set.name].items or {}
+        local items = {}
+        for _, piece in ipairs(SetPieces(set)) do
+            local link = piece.link
+            local was = old[piece.slot]
+            -- A bare "item:123" means the piece is not in reach right now: keep the full link seen earlier.
+            if link:find("^item:%d+$") and was and was.id == piece.id and was.link then link = was.link end
+            items[piece.slot] = {
+                id = piece.id,
+                name = link:match("%[(.-)%]") or (C_Item.GetItemNameByID and C_Item.GetItemNameByID(piece.id)) or nil,
+                link = link,
+                where = piece.where,
+            }
+        end
+        sets[set.name] = { icon = set.icon, items = items }
+    end
+    db.sets = sets
+    db.setsSaved = date("%Y-%m-%d %H:%M")
+end
+
+-- Several events in a row (a gear swap, looting) give one save.
+local saveTimer
+local function SaveSetsSoon()
+    if saveTimer then return end
+    saveTimer = C_Timer.NewTimer(2, function()
+        saveTimer = nil
+        SaveSets()
+    end)
+end
+
+NS.SwapThroughBank = SwapThroughBank
+NS.SaveSets = SaveSets
+NS.SaveSetsSoon = SaveSetsSoon
 NS.SetPieces = SetPieces
 NS.SetSummary = SetSummary
 NS.OtherSpecItems = OtherSpecItems
