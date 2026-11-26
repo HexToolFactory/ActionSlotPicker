@@ -2264,7 +2264,7 @@ SlashCmdList.LOADOUTMANAGER = function(msg)
     elseif cmd == "probe" then
         ProbeCommand(rest)
     elseif NS.GearCommand and NS.GearCommand(cmd, rest) then
-        -- sets, naked, bankswap, store <set>, pickup <set> (Gear.lua)
+        -- sets, naked, compare, bankswap, store <set>, pickup <set> (Gear.lua)
     elseif cmd == "list" then
         local list = Loadouts()
         if #list == 0 then Print("no loadouts for this class yet.") end
@@ -2281,6 +2281,7 @@ SlashCmdList.LOADOUTMANAGER = function(msg)
         Print("/lm naked - armor and weapons into the bags, again to dress")
         Print("/lm bankswap - on/off: a loadout or spec switch at the open bank swaps the sets through the bank")
         Print("/lm sets - gear sets window: where every set piece is (worn, bags, bank)")
+        Print("Shift + Alt + left click an item - compare it with the piece of every gear set")
         Print("/lm store <set> | /lm pickup <set> - equipment set to / from the bank (bank open)")
     end
 end

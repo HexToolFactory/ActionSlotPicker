@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.0
+- New comparison window: **Shift + Alt + left click** an item (bags, character window, loot, chat link, the gear
+  sets window) to see it against the piece of every gear set. One column per set with its loadout and talent spec,
+  the piece and where it is, and every stat with the difference in green or red. Sets that already use the item are
+  named. Also `/lm compare [item link]`.
+- The window adds up what counts: **Attack Power**, **Spell Power** and **Crit** rows hold the item's own lines plus
+  what its stats give your class (Strength as Attack Power, Agility and Intellect as crit), with the talents of
+  each set's talent spec, read from the talent texts ("Attack Power equal to 100% of your Intellect"). The talents
+  counted are listed below the table.
+- The game's own item comparison (Shift) is left alone again: the extra "Other spec" tooltip from 1.3.0 is gone,
+  the window replaces it.
+
 ## 2.0.0
 - New name: **Loadout Manager** (was Action Slot Picker). The addon folder is `LoadoutManager` now. Your loadouts and
   settings are taken over at the first login of each character; the small second folder `ActionSlotPicker` in the

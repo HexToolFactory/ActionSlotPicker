@@ -3,7 +3,8 @@
 --   Set swap at the bank: a loadout or spec switch fetches the new set, equips it and stores the old one.
 --   Naked mode: armor and weapons into the bags, the same items back on later.
 --   Gear sets window: every set with its pieces and where each one is (worn, bags, bank, missing).
---   Item comparison (Shift): next to the equipped item, the piece the other talent spec's set uses in that slot.
+--   Comparison window (Shift + Alt + left click on an item): its stats against the piece of every gear set,
+--   with totals (Attack Power, spell power, crit) by each set's talent spec.
 --   Set contents in the saved variables (LoadoutManagerCharDB.sets), for tools outside the game.
 -- Menu entries sit in the minimap button's quick menu; the "Gear sets" button at the bank opens the window.
 -- Items are moved the way a player does it: pick up, drop into a free slot. Out of combat only.
@@ -551,8 +552,24 @@ events:RegisterEvent("PLAYER_EQUIPMENT_CHANGED")
 events:RegisterEvent("EQUIPMENT_SETS_CHANGED")
 events:RegisterEvent("PLAYER_LOGIN")
 events:RegisterEvent("PLAYER_LOGOUT")
-events:SetScript("OnEvent", function(_, event)
+pcall(events.RegisterEvent, events, "GLOBAL_MOUSE_DOWN")
+pcall(events.RegisterEvent, events, "GET_ITEM_INFO_RECEIVED")
+for _, event in ipairs({ "TRAIT_CONFIG_UPDATED", "ACTIVE_TALENT_GROUP_CHANGED", "PLAYER_LEVEL_UP" }) do
+    pcall(events.RegisterEvent, events, event)
+end
+events:SetScript("OnEvent", function(_, event, arg1)
     if NS.off then return end -- the old addon is still running (see the main file)
+    if event == "GLOBAL_MOUSE_DOWN" then
+        if NS.OnGlobalClick then NS.OnGlobalClick(arg1) end -- Shift + Alt + left click: comparison window
+        return
+    elseif event == "GET_ITEM_INFO_RECEIVED" then
+        if NS.RefreshCompare then NS.RefreshCompare() end -- item data the window waited for
+        return
+    elseif event == "TRAIT_CONFIG_UPDATED" or event == "ACTIVE_TALENT_GROUP_CHANGED" or event == "PLAYER_LEVEL_UP" then
+        NS.StatsDirty() -- what the stats give has changed
+        if NS.RefreshCompare then NS.RefreshCompare() end
+        return
+    end
     if event == "PLAYER_LOGOUT" then
         if NS.SaveSets then NS.SaveSets() end -- last state before the saved variables are written
         return
@@ -581,6 +598,10 @@ local function GearCommand(cmd, rest)
         NS.ToggleGear(true)
     elseif cmd == "naked" then
         ToggleNaked()
+    elseif cmd == "compare" then
+        if not NS.OpenCompare(rest) then
+            Print("compare: Shift + Alt + left click an item you can wear, or /lm compare [item link].")
+        end
     elseif cmd == "bankswap" then
         NS.DB().bankSwap = not SwapEnabled()
         Print("set swap at the bank on a loadout or spec switch: " .. (SwapEnabled() and "on." or "off."))
@@ -915,11 +936,395 @@ function NS.RefreshGear()
 end
 
 ------------------------------------------------------------------------
--- Item comparison: the other talent spec's piece next to the equipped one
+-- What an item's stats give this character under a talent spec
 ------------------------------------------------------------------------
--- The game shows its comparison (Shift, or "always compare") through TooltipComparisonManager. A hook after it
--- adds up to two tooltips of our own with the piece the other spec's equipment set has in the same slot. The other
--- spec's set is the one bound to the loadout that is bound to the other spec.
+--   Attack Power, spell power and crit of an item are more than its own lines: Strength gives Attack Power, Agility
+--   and Intellect give crit, and talents add to that ("Attack Power equal to 100% of your Intellect").
+-- Nothing here is listed per class. Two sources:
+--   1. The game's own formulas for your class and level (GetAttackPowerForStat, GetCritChanceFromStat, ...).
+--   2. The description text of the talents learned in a spec ("Increases your Intellect by 10%",
+--      "... by 100% of your Intellect"). Sentences with a condition (procs, forms, timed effects) are left out.
+-- The talents of the spec you are not in are read from that spec's own talent set, the way the talent window
+-- shows its second tab. What was read while a spec was active is kept in the saved variables as a fallback.
+-- Buffs are not counted: they are the same whichever set you wear.
+-- In a block of its own: only the NS functions at its end are used outside.
+
+do
+local STR, AGI, STA, INT, SPI = 1, 2, 3, 4, 5
+
+local function Call(fn, ...)
+    if type(fn) ~= "function" then return nil end
+    local ok, a, b = pcall(fn, ...)
+    if not ok then return nil end
+    return Safe(a), Safe(b)
+end
+
+local function Num(v)
+    v = Safe(v)
+    return type(v) == "number" and v or nil
+end
+
+-- Talent text -> effects
+--   { kind = "statPct", stat = 1..5, pct = n }               "Increases your Intellect by 10%"
+--   { kind = "convert", stat = 1..5, to = target, pct = n }  "Attack Power equal to 100% of your Intellect"
+--   { kind = "resPct", res = "ap" | "rap", pct = n }         "Increases your Attack Power by 10%"
+
+local STAT_WORDS = { { "strength", STR }, { "agility", AGI }, { "stamina", STA }, { "intellect", INT }, { "spirit", SPI } }
+
+-- Words that make a sentence situational.
+local CONDITIONS = {
+    "while ", "when ", "whenever", "each time", "every time", "chance", "for %d+ sec", "for %d+ min", "after ",
+    "if ", "during ", "afflicting", "party", "raid", "against ", "your next", "stacks", "consumed", "nearby",
+    "allies", "target", "killing", "upon ",
+}
+
+local function Clean(text)
+    text = tostring(text or "")
+    text = text:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|n", " "):gsub("\n", " ")
+    text = text:gsub("&nbsp;", " "):gsub("\194\160", " ")
+    text = text:lower():gsub("%s+", " ")
+    text = text:gsub("of your total ", "of your ")
+    return text
+end
+
+local function Sentences(text)
+    local out = {}
+    for part in (text .. " "):gmatch("(.-)[%.;]%s") do
+        part = part:gsub("^%s+", ""):gsub("%s+$", "")
+        if part ~= "" then out[#out + 1] = part end
+    end
+    return out
+end
+
+local function IsConditional(sentence)
+    for _, word in ipairs(CONDITIONS) do
+        if sentence:find(word) then return true end
+    end
+    return false
+end
+
+local function StatsIn(fragment)
+    if fragment:find("all stats") or fragment:find("total stats") or fragment:find("all attributes")
+        or fragment:find("^stats") or fragment:find(" stats$") then
+        return { STR, AGI, STA, INT, SPI }
+    end
+    local found = {}
+    for _, word in ipairs(STAT_WORDS) do
+        if fragment:find(word[1]) then found[#found + 1] = word[2] end
+    end
+    return found
+end
+
+-- Which outcome a "... by X% of your <stat>" clause feeds, from the words before "by".
+local function Targets(head)
+    local t = {}
+    if head:find("ranged attack power") then
+        t[#t + 1] = "rap"
+    elseif head:find("melee attack power") then
+        t[#t + 1] = "ap"
+    elseif head:find("attack power") then
+        t[#t + 1] = "ap"
+        t[#t + 1] = "rap"
+    end
+    if head:find("spell damage and healing") or head:find("spell power") or head:find("damage and healing done by")
+        or head:find("spell damage and spell healing") then
+        t[#t + 1] = "spdmg"
+        t[#t + 1] = "heal"
+    else
+        if head:find("spell damage") or head:find("damage done by spells") then t[#t + 1] = "spdmg" end
+        if head:find("healing") then t[#t + 1] = "heal" end
+    end
+    return t
+end
+
+local function ParseSentence(s, effects)
+    for head, pct, statText in s:gmatch("([^,]-) by [%a ]-(%d+%.?%d*)%% of your (%a+)") do
+        for _, stat in ipairs(StatsIn(statText)) do
+            for _, to in ipairs(Targets(head)) do
+                effects[#effects + 1] = { kind = "convert", stat = stat, to = to, pct = tonumber(pct) }
+            end
+        end
+    end
+    for head, pct, statText in s:gmatch("([^,]-) equal to (%d+%.?%d*)%% of your (%a+)") do
+        for _, stat in ipairs(StatsIn(statText)) do
+            for _, to in ipairs(Targets(head)) do
+                effects[#effects + 1] = { kind = "convert", stat = stat, to = to, pct = tonumber(pct) }
+            end
+        end
+    end
+    for pct, statText, tail in s:gmatch("(%d+%.?%d*)%% of your (%a+) as ([%a ]+)") do
+        for _, stat in ipairs(StatsIn(statText)) do
+            for _, to in ipairs(Targets(tail)) do
+                effects[#effects + 1] = { kind = "convert", stat = stat, to = to, pct = tonumber(pct) }
+            end
+        end
+    end
+    -- Percent increases. A clause followed by " of your" was a conversion and is skipped.
+    local function PercentClause(what, pct, after)
+        if after:find("^ of ") then return end
+        pct = tonumber(pct)
+        local stats = StatsIn(what)
+        if #stats > 0 then
+            for _, stat in ipairs(stats) do effects[#effects + 1] = { kind = "statPct", stat = stat, pct = pct } end
+        elseif what:find("ranged attack power") then
+            effects[#effects + 1] = { kind = "resPct", res = "rap", pct = pct }
+        elseif what:find("melee attack power") then
+            effects[#effects + 1] = { kind = "resPct", res = "ap", pct = pct }
+        elseif what:find("attack power") then
+            effects[#effects + 1] = { kind = "resPct", res = "ap", pct = pct }
+            effects[#effects + 1] = { kind = "resPct", res = "rap", pct = pct }
+        end
+    end
+    for what, pct, after in s:gmatch("increases? your ([%a ,]-) by (%d+%.?%d*)%%(.?.?.?.?)") do
+        PercentClause(what:gsub("^total ", ""), pct, after)
+    end
+    for what, pct, after in s:gmatch("increases? (total [%a ,]-) by (%d+%.?%d*)%%(.?.?.?.?)") do
+        PercentClause(what:gsub("^total ", ""), pct, after)
+    end
+    for what, pct, after in s:gmatch("your ([%a ,]-) is increased by (%d+%.?%d*)%%(.?.?.?.?)") do
+        PercentClause(what, pct, after)
+    end
+    for what, pct, after in s:gmatch("your ([%a ,]-) are increased by (%d+%.?%d*)%%(.?.?.?.?)") do
+        PercentClause(what, pct, after)
+    end
+end
+
+local function ParseEffects(text)
+    local effects, seen, out = {}, {}, {}
+    for _, sentence in ipairs(Sentences(Clean(text))) do
+        if not IsConditional(sentence) then ParseSentence(sentence, effects) end
+    end
+    for _, e in ipairs(effects) do -- the patterns overlap: one effect once
+        local key = table.concat({ e.kind, tostring(e.stat), tostring(e.to), tostring(e.res), tostring(e.pct) }, ":")
+        if not seen[key] then
+            seen[key] = true
+            out[#out + 1] = e
+        end
+    end
+    return out
+end
+
+-- Talents of a spec
+
+local function LinesText(data)
+    if type(Safe(data)) ~= "table" or type(Safe(data.lines)) ~= "table" then return nil end
+    local parts = {}
+    for i, line in ipairs(data.lines) do
+        if line.leftText == nil and line.args and TooltipUtil and TooltipUtil.SurfaceArgs then
+            pcall(TooltipUtil.SurfaceArgs, line)
+        end
+        local text = Safe(line.leftText)
+        if i > 1 and type(text) == "string" and text ~= "" then parts[#parts + 1] = text end -- line 1 is the name
+    end
+    return table.concat(parts, ". ")
+end
+
+-- The talent set of a spec group. Second value: true when it is the set in use right now.
+local function ConfigOf(group)
+    local active = group == NS.ActiveSpecGroup()
+    local spec = C_SpecializationInfo
+    local id = spec and Num(Call(spec.GetCombatConfigIDForSpecGroup, group))
+    if (not id or id <= 0) and active and C_ClassTalents then id = Num(Call(C_ClassTalents.GetActiveConfigID)) end
+    if id and id > 0 then return id, active end
+    return nil, active
+end
+
+-- { talents = { { name, effects } }, learned = number of talents with points } or nil when nothing can be read.
+local function ReadTalents(configID)
+    if not (C_Traits and configID) then return nil end
+    local info = Call(C_Traits.GetConfigInfo, configID)
+    if type(info) ~= "table" or type(info.treeIDs) ~= "table" then return nil end
+    local out = { talents = {}, learned = 0 }
+    for _, treeID in ipairs(info.treeIDs) do
+        for _, nodeID in ipairs(Call(C_Traits.GetTreeNodes, treeID) or {}) do
+            local node = Call(C_Traits.GetNodeInfo, configID, nodeID)
+            if type(node) == "table" then
+                local rank = Num(node.ranksPurchased) or 0
+                if rank == 0 and (Num(node.activeRank) or 0) > 0 and (Num(node.ranksIncreased) or 0) == 0 then
+                    rank = Num(node.activeRank)
+                end
+                local entryID = (type(node.activeEntry) == "table" and Num(node.activeEntry.entryID))
+                    or (type(node.entryIDs) == "table" and Num(node.entryIDs[1]))
+                if rank > 0 and entryID then
+                    out.learned = out.learned + 1
+                    local entry = Call(C_Traits.GetEntryInfo, configID, entryID)
+                    local def = type(entry) == "table" and Num(entry.definitionID) and Call(C_Traits.GetDefinitionInfo, entry.definitionID)
+                    local spellID = type(def) == "table" and (Num(def.overriddenSpellID) or Num(def.spellID)) or nil
+                    local text = C_TooltipInfo and LinesText(Call(C_TooltipInfo.GetTraitEntry, entryID, rank))
+                    if (not text or text == "") and spellID and C_Spell then text = Call(C_Spell.GetSpellDescription, spellID) end
+                    local effects = type(text) == "string" and ParseEffects(text) or {}
+                    if #effects > 0 then
+                        local name = (type(def) == "table" and Safe(def.overrideName))
+                            or (spellID and C_Spell and Call(C_Spell.GetSpellName, spellID)) or "?"
+                        out.talents[#out.talents + 1] = { name = name, effects = effects }
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- The talents that count for a spec group: read now, or what was kept when that spec was last active.
+local function TalentsOf(group)
+    local db = NS.CharDB()
+    local configID, active = ConfigOf(group)
+    local read = ReadTalents(configID)
+    local kept = db and db.statTalents and db.statTalents[group]
+    if read and (active or read.learned > 0) then
+        if active and db then
+            db.statTalents = db.statTalents or {}
+            db.statTalents[group] = read.talents
+        end
+        return read.talents
+    end
+    return kept or (read and read.talents) or {}
+end
+
+-- Model: what one point of each stat gives under a spec
+
+local models, dirty = {}, true
+
+local function Slope(fn, stat, value)
+    local a, b = Num(Call(fn, stat, value)), Num(Call(fn, stat, value + 100))
+    if not a or not b then return 0 end
+    return (b - a) / 100
+end
+
+local function Build(group)
+    local m = { group = group, per = {}, names = {}, mult = { ap = 1, rap = 1 } }
+    local statMult, conv = { 1, 1, 1, 1, 1 }, { {}, {}, {}, {}, {} }
+    for _, talent in ipairs(TalentsOf(group)) do
+        m.names[#m.names + 1] = talent.name
+        for _, e in ipairs(talent.effects) do
+            if e.kind == "statPct" then
+                statMult[e.stat] = statMult[e.stat] * (1 + e.pct / 100)
+            elseif e.kind == "resPct" then
+                m.mult[e.res] = (m.mult[e.res] or 1) * (1 + e.pct / 100)
+            elseif e.kind == "convert" then
+                conv[e.stat][e.to] = (conv[e.stat][e.to] or 0) + e.pct / 100
+            end
+        end
+    end
+    for stat = 1, 5 do
+        local _, value = Call(UnitStat, "player", stat)
+        value = Num(value) or 100 -- secret in combat: the formulas are straight lines, any point does
+        local ap, rap = 0, 0
+        -- The game's own formulas give Attack Power for Strength and Agility only. A value for another stat is a
+        -- talent of the spec in use, and that comes from the talent text of the spec asked for instead.
+        if stat == STR or stat == AGI then
+            ap, rap = Slope(GetAttackPowerForStat, stat, value), Slope(GetRangedAttackPowerForStat, stat, value)
+        end
+        local c, mult = conv[stat], statMult[stat]
+        m.per[stat] = {
+            ap = (ap + (c.ap or 0)) * mult * m.mult.ap,
+            rap = (rap + (c.rap or 0)) * mult * m.mult.rap,
+            crit = Slope(GetCritChanceFromStat, stat, value) * 100 * mult,
+            spellcrit = Slope(GetSpellCritChanceFromStat, stat, value) * 100 * mult,
+            spdmg = (c.spdmg or 0) * mult,
+            heal = (c.heal or 0) * mult,
+        }
+    end
+    return m
+end
+
+-- The model of a talent spec group (default: the one in use). Rebuilt out of combat after talents changed.
+local function StatModel(group)
+    group = group or NS.ActiveSpecGroup()
+    if dirty and not (InCombatLockdown and InCombatLockdown()) then
+        models, dirty = {}, false
+    end
+    if not models[group] then
+        local ok, m = pcall(Build, group)
+        models[group] = ok and m or { group = group, per = {}, names = {}, mult = { ap = 1, rap = 1 } }
+    end
+    return models[group]
+end
+
+-- An item's outcomes
+
+local STAT_KEYS = {
+    "ITEM_MOD_STRENGTH_SHORT", "ITEM_MOD_AGILITY_SHORT", "ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_INTELLECT_SHORT",
+    "ITEM_MOD_SPIRIT_SHORT",
+}
+-- Item lines that are an outcome themselves.
+local DIRECT = {
+    ITEM_MOD_ATTACK_POWER_SHORT = { "ap", "rap" }, ITEM_MOD_MELEE_ATTACK_POWER_SHORT = { "ap" },
+    ITEM_MOD_RANGED_ATTACK_POWER_SHORT = { "rap" }, ITEM_MOD_SPELL_POWER_SHORT = { "spdmg", "heal" },
+    ITEM_MOD_SPELL_DAMAGE_DONE_SHORT = { "spdmg" }, ITEM_MOD_SPELL_HEALING_DONE_SHORT = { "heal" },
+}
+
+-- Hit and crit come from the game as ratings (10 for 1% hit, 14 for 1% crit on this client); shown as percent.
+local RATING_INDEX = {
+    hit = { melee = CR_HIT_MELEE or 6, ranged = CR_HIT_RANGED or 7, spell = CR_HIT_SPELL or 8 },
+    crit = { melee = CR_CRIT_MELEE or 9, ranged = CR_CRIT_RANGED or 10, spell = CR_CRIT_SPELL or 11 },
+}
+local RATING_PER_PERCENT = { hit = 10, crit = 14 }
+
+-- "hit" or "crit" and "melee", "ranged", "spell" or "all" for a stat key, nil for any other key.
+local function ChanceOf(key)
+    if key:find("TAKEN") or key:find("DAMAGE") or key:find("RESIL") then return nil end
+    local what = (key:find("CRIT") and "crit") or (key:find("HIT") and "hit")
+    if not what then return nil end
+    local kind = (key:find("SPELL") and "spell") or (key:find("MELEE") and "melee") or (key:find("RANGED") and "ranged") or "all"
+    return what, kind
+end
+
+local function ChancePercent(key, what, kind, value)
+    if not key:find("RATING") then return value end -- already a percent
+    local pct = Num(Call(GetCombatRatingBonusForCombatRatingValue, RATING_INDEX[what][kind == "all" and "melee" or kind], value))
+    if pct and pct > 0 then return pct end
+    return value / RATING_PER_PERCENT[what]
+end
+
+-- True for an item line that goes into an outcome row instead of a row of its own.
+local function IsOutcomeKey(key)
+    if DIRECT[key] then return true end
+    return ChanceOf(key) == "crit"
+end
+
+-- raw = the table C_Item.GetItemStats gives. Result: { ap, rap, spdmg, heal, crit, spellcrit } under the model.
+local function Outcomes(model, raw)
+    local o = { ap = 0, rap = 0, spdmg = 0, heal = 0, crit = 0, spellcrit = 0 }
+    for key, value in pairs(raw) do
+        value = Num(value)
+        if type(key) == "string" and value and value ~= 0 then
+            if DIRECT[key] then
+                for _, to in ipairs(DIRECT[key]) do o[to] = o[to] + value * (model.mult[to] or 1) end
+            else
+                local what, kind = ChanceOf(key)
+                if what == "crit" then
+                    local pct = ChancePercent(key, what, kind, value)
+                    if kind ~= "spell" then o.crit = o.crit + pct end
+                    if kind == "spell" or kind == "all" then o.spellcrit = o.spellcrit + pct end
+                end
+            end
+        end
+    end
+    for stat, key in ipairs(STAT_KEYS) do
+        local amount, per = Num(raw[key]), model.per[stat]
+        if amount and amount ~= 0 and per then
+            for to, each in pairs(per) do o[to] = o[to] + each * amount end
+        end
+    end
+    return o
+end
+
+NS.ParseEffects = ParseEffects
+NS.StatModel = StatModel
+NS.StatOutcomes = Outcomes
+NS.IsOutcomeKey = IsOutcomeKey
+NS.ChanceOf = ChanceOf
+NS.ChancePercent = ChancePercent
+NS.StatsDirty = function() dirty = true end
+end
+
+------------------------------------------------------------------------
+-- Comparison window: an item against the piece each gear set uses in its slot
+------------------------------------------------------------------------
+-- Shift + Alt + left click on an item (anywhere its tooltip is up: bags, character window, loot, chat links, the
+-- gear sets window) opens a window with one column per gear set: the piece that set holds in the item's slot, its
+-- stats and the difference to the clicked item. The game's own comparison tooltips are left alone.
 
 local INV_SLOTS = {
     INVTYPE_HEAD = { 1 }, INVTYPE_NECK = { 2 }, INVTYPE_SHOULDER = { 3 }, INVTYPE_BODY = { 4 },
@@ -929,6 +1334,10 @@ local INV_SLOTS = {
     INVTYPE_WEAPONOFFHAND = { 17 }, INVTYPE_SHIELD = { 17 }, INVTYPE_HOLDABLE = { 17 }, INVTYPE_RANGED = { 18 },
     INVTYPE_RANGEDRIGHT = { 18 }, INVTYPE_THROWN = { 18 }, INVTYPE_RELIC = { 18 }, INVTYPE_TABARD = { 19 },
 }
+local SLOT_NAMES = {
+    [11] = "Ring 1", [12] = "Ring 2", [13] = "Trinket 1", [14] = "Trinket 2", [16] = "Main hand", [17] = "Off hand",
+}
+local MAX_COLUMNS = 6
 
 -- The equipment set of the other talent spec (via its loadout), or nil.
 local function OtherSpecSet()
@@ -944,177 +1353,482 @@ local function OtherSpecSet()
 end
 
 -- Best link for an item of the character: the worn or carried one (with its enchant), else the bank one, else plain.
+-- Second value: where it is ("worn", "bags", "bank") or nil.
 local function LinkFor(id, inBags)
     for invSlot = 1, 19 do
         if Safe(GetInventoryItemID("player", invSlot)) == id then
-            return Safe(GetInventoryItemLink("player", invSlot)) or ("item:" .. id)
+            return Safe(GetInventoryItemLink("player", invSlot)) or ("item:" .. id), "worn"
         end
     end
-    if inBags[id] and inBags[id][1] then return inBags[id][1] end
+    if inBags[id] and inBags[id][1] then return inBags[id][1], "bags" end
     local db = NS.CharDB()
     local banked = db and db.bank and db.bank.items[id]
-    return banked and banked.link or ("item:" .. id)
+    if banked then return banked.link or ("item:" .. id), "bank" end
+    return "item:" .. id, nil
 end
 
--- The other spec pieces for the slot(s) the hovered item goes into: { { id, slot, link, set } }, at most two.
--- Left out: the hovered item itself and what is worn in those slots (the game comparison shows that already).
-local function OtherSpecItems(hoverID)
-    local list = {}
-    local _, _, _, equipLoc = C_Item.GetItemInfoInstant(hoverID)
+-- "DPS - Spec 1": the loadouts that equip this set, with the talent spec they are bound to.
+local function LoadoutsOf(setName)
+    local db = NS.CharDB()
+    local parts = {}
+    for _, loadout in ipairs(NS.Loadouts()) do
+        if loadout.equipmentSet == setName then
+            local text = loadout.name
+            for group = 1, 4 do
+                if db and db.specLoadouts and db.specLoadouts[group] == loadout.name then
+                    text = text .. " - Spec " .. group
+                end
+            end
+            parts[#parts + 1] = text
+        end
+    end
+    return table.concat(parts, ", ")
+end
+
+-- The talent spec group whose loadout equips this set, nil when no spec is bound to it.
+local function SpecGroupOf(setName)
+    local db = NS.CharDB()
+    for group = 1, 4 do
+        local name = db and db.specLoadouts and db.specLoadouts[group]
+        local loadout = name and NS.FindLoadout(name)
+        if loadout and loadout.equipmentSet == setName then return group end
+    end
+end
+
+local function ItemID(link)
+    if type(link) == "number" then return link end
+    return type(link) == "string" and tonumber(link:match("item:(%d+)")) or nil
+end
+
+-- One column per gear set and slot for the item: { set, loadouts, group, slotName, id, link, where }, the other talent
+-- spec's set first. id = nil: that set has nothing in the slot. Second value: names of the sets that already hold
+-- this very item. nil when the item cannot be worn.
+local function CompareColumns(link)
+    local id = ItemID(link)
+    if not id then return nil end
+    local _, _, _, equipLoc = C_Item.GetItemInfoInstant(id)
     local slots = equipLoc and INV_SLOTS[equipLoc]
-    local set = slots and OtherSpecSet()
-    if not set then return list end
-    local ids = C_EquipmentSet.GetItemIDs(set.setID) or {}
-    local worn, seen, inBags = {}, {}, nil
-    for _, invSlot in ipairs(slots) do
-        local id = Safe(GetInventoryItemID("player", invSlot))
-        if id then worn[id] = true end
+    if not slots then return nil end
+    local sets = NS.EquipmentSets() -- by name
+    local first = OtherSpecSet()
+    if first then
+        table.sort(sets, function(a, b)
+            local aFirst, bFirst = a.setID == first.setID, b.setID == first.setID
+            if aFirst ~= bFirst then return aFirst end
+            return a.name < b.name
+        end)
     end
-    for _, invSlot in ipairs(slots) do
-        local id = Safe(ids[invSlot])
-        if type(id) == "number" and id > 0 and id ~= hoverID and not worn[id] and not seen[id] then
-            seen[id] = true
-            inBags = inBags or BagGear()
-            list[#list + 1] = { id = id, slot = invSlot, link = LinkFor(id, inBags), set = set.name }
+    local columns, uses, inBags = {}, {}, BagGear()
+    for _, set in ipairs(sets) do
+        local ids = C_EquipmentSet.GetItemIDs(set.setID) or {}
+        local seen, usesThis = {}, false
+        for _, invSlot in ipairs(slots) do
+            local piece = Safe(ids[invSlot])
+            if type(piece) ~= "number" or piece <= 0 then piece = nil end
+            if piece == id then
+                usesThis = true
+            elseif not seen[piece or 0] and #columns < MAX_COLUMNS then
+                seen[piece or 0] = true
+                local column = { set = set.name, loadouts = LoadoutsOf(set.name), group = SpecGroupOf(set.name), id = piece }
+                if #slots > 1 then column.slotName = SLOT_NAMES[invSlot] end
+                if piece then column.link, column.where = LinkFor(piece, inBags) end
+                columns[#columns + 1] = column
+            end
+        end
+        if usesThis then uses[#uses + 1] = set.name end
+    end
+    return columns, uses
+end
+
+-- Item stats --------------------------------------------------------------
+
+local function StatLabel(key)
+    local text = _G[key]
+    if type(text) == "string" and text ~= "" then return text end
+    text = key:gsub("^ITEM_MOD_", ""):gsub("_SHORT$", ""):gsub("_NAME$", ""):gsub("_", " "):lower()
+    return (text:gsub("^%l", string.upper))
+end
+
+-- stats[key] = { v = number, pct = true for percent values }: the item's own lines, without those that go into a
+-- total (Attack Power, spell power, crit). Second value: the game's own table. nil while the game has no data
+-- for the item yet.
+local function StatsOf(link, id)
+    local fn = C_Item and C_Item.GetItemStats
+    if not fn or not link then return nil end
+    local raw = fn(link)
+    if type(raw) ~= "table" and id then raw = fn("item:" .. id) end
+    if type(raw) ~= "table" then
+        if id and C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(id) end
+        return nil
+    end
+    local stats = {}
+    for key, value in pairs(raw) do
+        value = Safe(value)
+        if type(key) == "string" and type(value) == "number" and value ~= 0 and not NS.IsOutcomeKey(key) then
+            local what, kind = NS.ChanceOf(key) -- hit: a rating from the game, shown as percent
+            if what then
+                stats[key] = { v = NS.ChancePercent(key, what, kind, value), pct = true }
+            else
+                stats[key] = { v = value }
+            end
         end
     end
-    return list
+    return stats, raw
 end
 
-local compareTips = {}
-local compareOwner
+local STAT_ORDER = {
+    "RESISTANCE0_NAME", "ITEM_MOD_DAMAGE_PER_SECOND_SHORT", "ITEM_MOD_STRENGTH_SHORT", "ITEM_MOD_AGILITY_SHORT",
+    "ITEM_MOD_STAMINA_SHORT", "ITEM_MOD_INTELLECT_SHORT", "ITEM_MOD_SPIRIT_SHORT",
+}
+-- Totals: an item's own lines plus what its stats give under a talent spec, e.g. Attack Power from
+-- Strength, and from Intellect with the talent for it. A pair with the same numbers everywhere is one row.
+local TOTAL_ROWS = {
+    { key = "ap", label = "Attack Power" },
+    { key = "rap", label = "Ranged Attack Power", ranged = true },
+    { key = "spdmg", label = "Spell Damage", same = "heal", sameKey = "sp", sameLabel = "Spell Power" },
+    { key = "heal", label = "Healing" },
+    { key = "crit", label = "Melee Crit", pct = true, same = "spellcrit", sameKey = "crit", sameLabel = "Crit" },
+    { key = "spellcrit", label = "Spell Crit", pct = true },
+}
+local RANGED_CLASS = { HUNTER = true, WARRIOR = true, ROGUE = true }
+local EPS = 0.005
 
-local function HideCompare()
-    compareOwner = nil
-    for _, tip in ipairs(compareTips) do
-        tip.aspLink = nil
-        tip:Hide()
-    end
+local function FmtStat(v, pct)
+    local text = ("%.2f"):format(v):gsub("0+$", ""):gsub("%.$", "")
+    return pct and (text .. "%") or text
 end
 
-local function ComparisonWanted(tooltip)
-    for _, shopping in ipairs(tooltip.shoppingTooltips or {}) do
-        if shopping:IsShown() then return true end
-    end
-    return (IsModifiedClick and IsModifiedClick("COMPAREITEMS")) or (GetCVarBool and GetCVarBool("alwaysCompareItems")) or false
-end
-
-local function CompareTip(i)
-    local tip = compareTips[i]
-    if tip then return tip end
-    tip = CreateFrame("GameTooltip", "LoadoutManagerCompareTooltip" .. i, UIParent, "ShoppingTooltipTemplate")
-    tip:SetFrameStrata("TOOLTIP")
-    tip:SetClampedToScreen(true)
-    local waited = 0
-    tip:SetScript("OnUpdate", function(_, elapsed) -- gone as soon as the game comparison is
-        waited = waited + (elapsed or 0)
-        if waited < 0.1 then return end
-        waited = 0
-        if not compareOwner or not compareOwner:IsShown() or not ComparisonWanted(compareOwner) then HideCompare() end
-    end)
-    compareTips[i] = tip
-    return tip
-end
-
-local function FillCompareTip(tip, owner, item)
-    local header = "Other spec: " .. item.set
-    tip:SetOwner(owner, "ANCHOR_NONE")
-    tip:ClearAllPoints()
-    local data = tip.CompareHeader and tip.ProcessInfo and C_TooltipInfo and C_TooltipInfo.GetHyperlink
-        and C_TooltipInfo.GetHyperlink(item.link)
-    if data then
-        -- the way the game fills its own comparison tooltips: header label, then the item appended
-        tip:ClearLines()
-        tip.CompareHeader:Show()
-        tip.CompareHeader.Label:SetText(header)
-        tip.CompareHeader:SetWidth(tip.CompareHeader.Label:GetWidth() + 30)
-        tip:ProcessInfo({ tooltipData = data, append = true })
-    else
-        tip:SetHyperlink(item.link)
-        tip:AddLine(header, 0.4, 0.73, 1)
-    end
-    tip.aspLink, tip.aspHeader = item.link, header
-    tip:Show()
-end
-
--- Next to the outermost tooltip of the group (item tooltip + the game comparison tooltips), away from the item
--- tooltip; on the other side when there is no room.
-local function PlaceCompareTips(tooltip, shown)
-    local left, right, leftFrame, rightFrame
-    local group = { tooltip }
-    for _, shopping in ipairs(tooltip.shoppingTooltips or {}) do
-        if shopping:IsShown() then group[#group + 1] = shopping end
-    end
-    for _, f in ipairs(group) do
-        local l, r = Safe(f:GetLeft()), Safe(f:GetRight())
-        if l and r then
-            if not left or l < left then left, leftFrame = l, f end
-            if not right or r > right then right, rightFrame = r, f end
-        end
-    end
-    if not left then return false end -- positions unknown (secret in combat)
-    local width = 0
-    for _, tip in ipairs(shown) do width = width + (Safe(tip:GetWidth()) or 0) end
-    local roomRight = (GetScreenWidth() or 0) - right
-    local side
-    if leftFrame ~= tooltip and rightFrame == tooltip then
-        side = "left"
-    elseif rightFrame ~= tooltip and leftFrame == tooltip then
-        side = "right"
-    else
-        side = roomRight >= left and "right" or "left"
-    end
-    if side == "left" and left < width and roomRight >= width then
-        side = "right"
-    elseif side == "right" and roomRight < width and left >= width then
-        side = "left"
-    end
-    local anchor = side == "left" and leftFrame or rightFrame
-    for _, tip in ipairs(shown) do
-        tip:ClearAllPoints()
-        if side == "left" then
-            tip:SetPoint("TOPRIGHT", anchor, "TOPLEFT")
+-- The rows of the window. row = { key, label, pct, item = value or nil, cols = { [i] = { v = value or nil,
+-- d = item - piece } } }; a column without data yet has loading = true and no cells.
+-- Total rows (total = true) are worked out per column with the talent spec of that column's set; "item" is the
+-- value under the spec in use, and a cell has own = the item's value under its spec where that differs.
+local function CompareRows(link, columns)
+    local id = ItemID(link)
+    local own, ownRaw = StatsOf(link, id)
+    own, ownRaw = own or {}, ownRaw or {}
+    local perColumn, perRaw = {}, {}
+    for i, column in ipairs(columns) do
+        if column.id then
+            perColumn[i], perRaw[i] = StatsOf(column.link, column.id)
+            column.loading = perColumn[i] == nil
         else
-            tip:SetPoint("TOPLEFT", anchor, "TOPRIGHT")
+            perColumn[i], perRaw[i] = {}, {}
         end
-        anchor = tip
     end
-    tooltip.aspCompareSide = side
+
+    -- The item's own lines. Two keys with the same name (the game lists some resistances twice) are one row.
+    local info = {} -- lower-case label -> { key, label, pct }
+    local function ByLabel(stats)
+        local out = {}
+        for key, stat in pairs(stats) do
+            local label = StatLabel(key)
+            local name = label:lower()
+            local row = info[name]
+            if not row then
+                row = { key = key, label = label }
+                info[name] = row
+            end
+            if key < row.key then row.key = key end
+            if label < row.label then row.label = label end
+            if stat.pct then row.pct = true end
+            if not out[name] or math.abs(stat.v) > math.abs(out[name]) then out[name] = stat.v end
+        end
+        return out
+    end
+    local mine, theirs = ByLabel(own), {}
+    for i in ipairs(columns) do theirs[i] = perColumn[i] and ByLabel(perColumn[i]) end
+
+    local rows, placed = {}, {}
+    local function Add(name)
+        local known = info[name]
+        if not known or placed[name] then return end
+        placed[name] = true
+        local row = { key = known.key, label = known.label, pct = known.pct, item = mine[name], cols = {} }
+        for i in ipairs(columns) do
+            if theirs[i] then row.cols[i] = { v = theirs[i][name], d = (mine[name] or 0) - (theirs[i][name] or 0) } end
+        end
+        rows[#rows + 1] = row
+    end
+    for _, key in ipairs(STAT_ORDER) do Add(StatLabel(key):lower()) end
+
+    -- Totals, each column with the talents of its set's spec.
+    local active = NS.StatModel()
+    local mineActive, mineIn, theirsIn, talents = NS.StatOutcomes(active, ownRaw), {}, {}, {}
+    talents[active.group] = active.names
+    for i, column in ipairs(columns) do
+        if perRaw[i] then
+            local model = NS.StatModel(column.group)
+            talents[model.group] = model.names
+            mineIn[i], theirsIn[i] = NS.StatOutcomes(model, ownRaw), NS.StatOutcomes(model, perRaw[i])
+        end
+    end
+    local function Same(a, b)
+        if math.abs(mineActive[a] - mineActive[b]) >= EPS then return false end
+        for i in ipairs(columns) do
+            if mineIn[i] and (math.abs(mineIn[i][a] - mineIn[i][b]) >= EPS or math.abs(theirsIn[i][a] - theirsIn[i][b]) >= EPS) then
+                return false
+            end
+        end
+        return true
+    end
+    local _, class = UnitClass("player")
+    local skip = {}
+    for _, total in ipairs(TOTAL_ROWS) do
+        local key, label, rowKey = total.key, total.label, total.key
+        if total.same and Same(key, total.same) then
+            skip[total.same] = true
+            label, rowKey = total.sameLabel, total.sameKey
+        end
+        local show = not skip[key] and math.abs(mineActive[key]) >= EPS
+        if total.ranged and (not RANGED_CLASS[class] or Same("ap", "rap")) then skip[key] = true end
+        local row = { key = rowKey, label = label, pct = total.pct, total = true, cols = {} }
+        row.item = math.abs(mineActive[key]) >= EPS and mineActive[key] or nil
+        for i in ipairs(columns) do
+            if mineIn[i] then
+                local a, b = mineIn[i][key], theirsIn[i][key]
+                row.cols[i] = { v = math.abs(b) >= EPS and b or nil, d = a - b }
+                if math.abs(a - mineActive[key]) >= EPS then row.cols[i].own = a end
+                if math.abs(a) >= EPS or math.abs(b) >= EPS then show = true end
+            end
+        end
+        if show and not skip[key] then rows[#rows + 1] = row end
+    end
+
+    local rest = {}
+    for name in pairs(info) do
+        if not placed[name] then rest[#rest + 1] = name end
+    end
+    table.sort(rest, function(a, b) return info[a].label < info[b].label end)
+    for _, name in ipairs(rest) do Add(name) end
+    return rows, talents
+end
+
+-- Window --------------------------------------------------------------------
+
+local LABEL_W, ITEM_W, COL_W, ROW_H, HEAD_H = 150, 64, 190, 16, 74
+local TOTAL_HEX = "7fd4ff" -- rows that are totals
+local compareFrame, compareLink
+local cells, heads = {}, {}
+
+local function Cell(i)
+    local fs = cells[i]
+    if not fs then
+        fs = compareFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        fs:SetWordWrap(false)
+        cells[i] = fs
+    end
+    fs:Show()
+    return fs
+end
+
+local function Head(i)
+    local h = heads[i]
+    if h then return h end
+    h = CreateFrame("Button", nil, compareFrame)
+    h:SetSize(COL_W - 8, HEAD_H - 20)
+    h.set = h:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    h.set:SetPoint("TOPLEFT")
+    h.set:SetWidth(COL_W - 8)
+    h.set:SetJustifyH("LEFT")
+    h.set:SetWordWrap(false)
+    h.loadouts = h:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    h.loadouts:SetPoint("TOPLEFT", h.set, "BOTTOMLEFT", 0, -1)
+    h.loadouts:SetWidth(COL_W - 8)
+    h.loadouts:SetJustifyH("LEFT")
+    h.loadouts:SetWordWrap(false)
+    h.piece = h:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    h.piece:SetPoint("TOPLEFT", h.loadouts, "BOTTOMLEFT", 0, -2)
+    h.piece:SetWidth(COL_W - 8)
+    h.piece:SetJustifyH("LEFT")
+    h.piece:SetWordWrap(false)
+    h.where = h:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    h.where:SetPoint("TOPLEFT", h.piece, "BOTTOMLEFT", 0, -1)
+    h:SetScript("OnEnter", function(self)
+        if not self.link then return end
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOMRIGHT")
+        GameTooltip:SetHyperlink(self.link)
+        GameTooltip:Show()
+    end)
+    h:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    heads[i] = h
+    return h
+end
+
+local function DiffText(d, pct)
+    if math.abs(d) < 0.005 then return "|cff808080=|r" end
+    return ("|cff%s%s%s|r"):format(d > 0 and "40ff40" or "ff4040", d > 0 and "+" or "-", FmtStat(math.abs(d), pct))
+end
+
+local function RefreshCompare()
+    local columns, uses = CompareColumns(compareLink)
+    columns, uses = columns or {}, uses or {}
+    local rows, talents = CompareRows(compareLink, columns)
+    compareFrame.columns, compareFrame.rows, compareFrame.uses, compareFrame.talents = columns, rows, uses, talents -- for the tests
+    local id = ItemID(compareLink)
+    compareFrame.icon:SetTexture(id and C_Item.GetItemIconByID(id) or 134400)
+    compareFrame.item:SetText(compareLink)
+
+    local used = 0
+    local function Text(x, y, width, justify, text)
+        used = used + 1
+        local fs = Cell(used)
+        fs:ClearAllPoints()
+        fs:SetPoint("TOPLEFT", x, y)
+        fs:SetWidth(width)
+        fs:SetJustifyH(justify)
+        fs:SetText(text)
+        return fs
+    end
+    local left, top = 16, -62
+    local colX = left + LABEL_W + ITEM_W + 14
+    Text(left + LABEL_W, top - HEAD_H + 16, ITEM_W, "RIGHT", "|cffffd100This item|r")
+    for i, column in ipairs(columns) do
+        local h = Head(i)
+        h:ClearAllPoints()
+        h:SetPoint("TOPLEFT", colX + (i - 1) * COL_W, top)
+        h.link = column.link
+        h.set:SetText(column.set .. (column.slotName and (" |cff999999" .. column.slotName .. "|r") or ""))
+        h.loadouts:SetText(column.loadouts ~= "" and column.loadouts or "no loadout")
+        h.piece:SetText(column.id and column.link or "|cff808080(empty slot)|r")
+        local where = column.where and WHERE[column.where]
+        h.where:SetText(column.loading and "|cff808080loading...|r"
+            or (where and ("|cff%s%s|r"):format(where.hex, where.text:lower())) or (column.id and "|cffff4040not found|r") or "")
+        h:Show()
+    end
+    for i = #columns + 1, #heads do heads[i]:Hide() end
+
+    local y = top - HEAD_H
+    local anyTotal = false
+    for _, row in ipairs(rows) do
+        anyTotal = anyTotal or row.total
+        Text(left, y, LABEL_W, "LEFT", row.total and ("|cff" .. TOTAL_HEX .. row.label .. "|r") or row.label)
+        Text(left + LABEL_W, y, ITEM_W, "RIGHT", row.item and FmtStat(row.item, row.pct) or "|cff808080-|r")
+        for i in ipairs(columns) do
+            local cell = row.cols[i]
+            if cell then
+                local x = colX + (i - 1) * COL_W
+                Text(x, y, 56, "RIGHT", cell.v and FmtStat(cell.v, row.pct) or "|cff808080-|r")
+                local diff = DiffText(cell.d, row.pct)
+                -- this set's talents make something else of the item than the spec in use does
+                if cell.own then diff = diff .. " |cff808080(this: " .. FmtStat(cell.own, row.pct) .. ")|r" end
+                Text(x + 62, y, COL_W - 70, "LEFT", diff)
+            end
+        end
+        y = y - ROW_H
+    end
+    if #rows == 0 then
+        Text(left, y, 400, "LEFT", "|cff808080No stats to compare.|r")
+        y = y - ROW_H
+    end
+    y = y - 6
+    if #columns == 0 then
+        Text(left, y, 460, "LEFT", #uses > 0 and "No other gear set has a piece for this slot." or "No gear set has a piece for this slot.")
+        y = y - ROW_H
+    end
+    if #uses > 0 then
+        Text(left, y, 460, "LEFT", "|cff66bbffAlready in: " .. table.concat(uses, ", ") .. "|r")
+        y = y - ROW_H
+    end
+    Text(left, y, 520, "LEFT", "|cff808080Green: this item is better than that set's piece. Hover a piece for its tooltip.|r")
+    y = y - ROW_H
+    if anyTotal then
+        Text(left, y, 520, "LEFT", "|cff" .. TOTAL_HEX .. "Blue|r|cff808080: own lines + what the stats give, by each set's talent spec.|r")
+        y = y - ROW_H
+        local groups = {}
+        for group, names in pairs(talents) do
+            if #names > 0 then groups[#groups + 1] = group end
+        end
+        table.sort(groups)
+        for _, group in ipairs(groups) do
+            local names = talents[group]
+            local shown = table.concat(names, ", ", 1, math.min(#names, 4)) .. (#names > 4 and ", ..." or "")
+            Text(left, y, 520, "LEFT", ("|cff808080Spec %d talents counted: %s|r"):format(group, shown))
+            y = y - ROW_H
+        end
+    end
+    for i = used + 1, #cells do cells[i]:Hide() end
+    compareFrame:SetSize(math.max(540, colX + #columns * COL_W + 8), -y + 14)
+end
+
+local function CreateCompareWindow()
+    compareFrame = CreateFrame("Frame", "LoadoutManagerCompareFrame", UIParent, "BasicFrameTemplateWithInset")
+    compareFrame:SetSize(540, 300)
+    compareFrame:SetFrameStrata("DIALOG")
+    compareFrame:SetToplevel(true)
+    compareFrame:SetClampedToScreen(true)
+    compareFrame:SetMovable(true)
+    compareFrame:EnableMouse(true)
+    compareFrame:RegisterForDrag("LeftButton")
+    compareFrame:SetScript("OnDragStart", compareFrame.StartMoving)
+    compareFrame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local point, _, relPoint, x, y = self:GetPoint()
+        NS.DB().compareWindow = { point = point, relPoint = relPoint, x = x, y = y }
+    end)
+    local pos = NS.DB().compareWindow
+    if pos and pos.point then
+        compareFrame:SetPoint(pos.point, UIParent, pos.relPoint or pos.point, pos.x or 0, pos.y or 0)
+    else
+        compareFrame:SetPoint("CENTER", 0, 120)
+    end
+    if compareFrame.TitleText then compareFrame.TitleText:SetText("Gear Set Comparison") end
+    tinsert(UISpecialFrames, compareFrame:GetName())
+    compareFrame.icon = compareFrame:CreateTexture(nil, "ARTWORK")
+    compareFrame.icon:SetSize(24, 24)
+    compareFrame.icon:SetPoint("TOPLEFT", 16, -30)
+    compareFrame.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    compareFrame.item = compareFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    compareFrame.item:SetPoint("LEFT", compareFrame.icon, "RIGHT", 8, 0)
+    compareFrame:Hide()
+end
+
+-- Opens the window for an item link. False when the item cannot be worn.
+local function OpenCompare(link)
+    link = Safe(link)
+    if type(link) ~= "string" or not CompareColumns(link) then return false end
+    if not compareFrame then CreateCompareWindow() end
+    compareLink = link
+    NS.StatsDirty() -- talents are read again at every opening
+    RefreshCompare()
+    compareFrame:Show()
     return true
 end
 
-local function OnCompareItem(_, comparisonItem, tooltip)
-    if NS.off or not comparisonItem or not tooltip or not tooltip.GetPrimaryTooltipData then
-        HideCompare()
-        return
-    end
-    local data = tooltip:GetPrimaryTooltipData()
-    local id = data and Safe(data.id)
-    local items = type(id) == "number" and OtherSpecItems(id) or {}
-    if #items == 0 then
-        HideCompare()
-        return
-    end
-    compareOwner = tooltip
-    local shown = {}
-    for i, item in ipairs(items) do
-        local tip = CompareTip(i)
-        if tip.aspLink ~= item.link or not tip:IsShown() then FillCompareTip(tip, tooltip, item) end
-        shown[i] = tip
-    end
-    for i = #items + 1, #compareTips do
-        compareTips[i].aspLink = nil
-        compareTips[i]:Hide()
-    end
-    if not PlaceCompareTips(tooltip, shown) then HideCompare() end
+function NS.RefreshCompare()
+    if compareFrame and compareFrame:IsShown() and compareLink then RefreshCompare() end
 end
 
-if TooltipComparisonManager and TooltipComparisonManager.CompareItem and hooksecurefunc then
-    hooksecurefunc(TooltipComparisonManager, "CompareItem", OnCompareItem)
-    hooksecurefunc(TooltipComparisonManager, "Clear", function(_, tooltip)
-        if not tooltip or tooltip == compareOwner then HideCompare() end
-    end)
+-- The item the game tooltip shows right now, as a link.
+local function HoveredItemLink()
+    local tip = GameTooltip
+    if not tip or not tip:IsShown() then return nil end
+    local data = tip.GetPrimaryTooltipData and tip:GetPrimaryTooltipData()
+    if type(data) == "table" then
+        local itemType = Enum.TooltipDataType and Enum.TooltipDataType.Item
+        if itemType ~= nil and Safe(data.type) ~= itemType then return nil end
+        local link = Safe(data.hyperlink)
+        if type(link) == "string" and link:find("item:", 1, true) then return link end
+        local guid = Safe(data.guid)
+        link = guid and C_Item.GetItemLinkByGUID and Safe(C_Item.GetItemLinkByGUID(guid))
+        if type(link) == "string" and link ~= "" then return link end
+        local id = Safe(data.id)
+        if type(id) == "number" then return "item:" .. id end
+    end
+    return nil
 end
+
+-- Shift + Alt + left click, wherever the mouse is: compare the item under it.
+local function OnGlobalClick(button)
+    if NS.off or button ~= "LeftButton" then return end
+    if not (IsShiftKeyDown() and IsAltKeyDown and IsAltKeyDown()) then return end
+    local link = HoveredItemLink()
+    if link then OpenCompare(link) end
+end
+
+NS.CompareColumns = CompareColumns
+NS.CompareRows = CompareRows
+NS.OpenCompare = OpenCompare
+NS.OnGlobalClick = OnGlobalClick
 
 ------------------------------------------------------------------------
 -- Set contents in the saved variables
@@ -1166,5 +1880,3 @@ NS.SaveSets = SaveSets
 NS.SaveSetsSoon = SaveSetsSoon
 NS.SetPieces = SetPieces
 NS.SetSummary = SetSummary
-NS.OtherSpecItems = OtherSpecItems
-NS.OnCompareItem = OnCompareItem

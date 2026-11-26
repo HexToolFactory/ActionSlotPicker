@@ -35,9 +35,10 @@ account; spells and macros are matched by name. Right-click the minimap button f
   go back on. `/lm naked`
 - **Gear sets window** (`/lm sets`): every equipment set with its pieces and where each one is: worn, bags, bank or
   missing. The bank's gear is remembered from the last visit, so the window also works away from the bank
-- **Other spec in the item comparison**: hold Shift on an item and, next to the equipped piece, a tooltip
-  "Other spec: <set>" shows what your other talent spec wears in that slot (the equipment set of the loadout bound
-  to that spec)
+- **Comparison window**: Shift + Alt + left click an item to compare it with the piece every gear set uses in that
+  slot. One column per set (with its loadout and talent spec), all stats, and the difference in green or red.
+  Attack Power, Spell Power and Crit are totals: the item's own lines plus what its stats give your class under
+  each set's talent spec, talents included. `/lm compare [item link]` does the same
 
 **Saved variables**: the items of every equipment set are stored per character in `LoadoutManagerCharDB.sets`
 (`[set name].items[inventory slot] = { id, name, link, where }`, `where` = worn, bags, bank or missing), with the
